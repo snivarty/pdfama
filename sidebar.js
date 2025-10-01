@@ -61,7 +61,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
                             console.log("Creating Teaser summarizer...");
                             const teaserSummarizer = await self.Summarizer.create({ 'type': 'teaser', 'format': 'markdown', 'length': 'medium'});
-                            console.log("teasr summarizer created.");                            
+                            console.log("teaser summarizer created.");                            
 
                             console.log("Creating Key Points summarizer...");
                             const keyPointsSummarizer = await self.Summarizer.create({ 'type': 'key-points', 'format': 'markdown', 'length': 'long'});
@@ -77,7 +77,7 @@ document.addEventListener('DOMContentLoaded', () => {
                                 sendMessage({ status: 'tldr_success', data: tldr });
                             }).catch(e => sendMessage({ status: 'error', data: `TLDR summarization failed: ${e.message}` }));
 
-                            const teaserPromise = teaserSummarizer.summarize(text).then(tldr => {
+                            const teaserPromise = teaserSummarizer.summarize(text).then(teaser => {
                                 console.log("teaser is", tldr);
                                 sendMessage({ status: 'teaser_success', data: teaser });
                             }).catch(e => sendMessage({ status: 'error', data: `Teaser summarization failed: ${e.message}` }));
