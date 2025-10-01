@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>pdfAMA</title>
+  <link rel="stylesheet" href="sidebar.css">
+</head>
+<body>
+  <div class="container">
+    <h1>pdfAMA</h1>
+    
+    <div id="progress-container" style="display: none;">
+      <div id="progress-label">Downloading AI Model...</div>
+      <div id="progress-bar">
+        <div id="progress-bar-inner"></div>
+      </div>
+    </div>
+
+    <div class="tabs">
+      <button class="tab-button active" data-tab="summary">Summary</button>
+      <button class="tab-button" data-tab="ama">AMA</button>
+    </div>
+
+    <div id="summary" class="tab-content active">
+      <h2>Summary</h2>
+      <div id="summary-container">
+        <div id="headline-container">
+          <h3>Headline</h3>
+          <p id="headline-content"></p>
+        </div>
+        <div id="tldr-container">
+          <h3>TL;DR</h3>
+          <p id="tldr-content"></p>
+        </div>
+        <div id="teaser-container">
+          <h3>Teaser</h3>
+          <p id="teaser-content"></p>
+        </div>
+        <div id="key-points-container">
+          <h3>Key Points</h3>
+          <ul id="key-points-content"></ul>
+        </div>
+      </div>
+    </div>
+
+    <div id="ama" class="tab-content">
+      <h2>AMA</h2>
+      <div id="chat-container">
+        <div id="chat-messages"></div>
+        <div id="chat-input-container">
+          <input type="text" id="chat-input" placeholder="Ask a question...">
+          <button id="chat-send">Send</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="sidebar.js"></script>
+</body>
+</html>
