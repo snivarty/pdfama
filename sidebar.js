@@ -42,8 +42,6 @@ document.addEventListener('DOMContentLoaded', () => {
                      return;
                 }
                 const text = payload.text;
-                //console.log("text is", text);
-
                 if (type === 'summarize') {
                     if ('Summarizer' in self) {
                         const availability = await self.Summarizer.availability();
@@ -78,7 +76,7 @@ document.addEventListener('DOMContentLoaded', () => {
                             }).catch(e => sendMessage({ status: 'error', data: `TLDR summarization failed: ${e.message}` }));
 
                             const teaserPromise = teaserSummarizer.summarize(text).then(teaser => {
-                                console.log("teaser is", tldr);
+                                console.log("teaser is", teaser);
                                 sendMessage({ status: 'teaser_success', data: teaser });
                             }).catch(e => sendMessage({ status: 'error', data: `Teaser summarization failed: ${e.message}` }));
 
@@ -93,8 +91,36 @@ document.addEventListener('DOMContentLoaded', () => {
                         } else { sendMessage({ status: 'error', data: `Model not available. Status: ${availability}` }); }
                     } else { sendMessage({ status: 'error', data: "Summarizer API not found." }); }
                 } else if (type === 'ama') {
-                    // Placeholder for now to prevent errors
-                    sendMessage({ status: 'error', data: 'Chat functionality is being fixed. Please try again soon.' });
+                    if ('LanguageModel' in self) {
+                        const availability = await self.LanguageModel.availability();
+                        if (availability === 'available' || availability === 'downloadable') {
+                            if (!window.chatSession) {
+                                console.log("Creating chat session...");
+                                window.chatSession = await self.LanguageModel.create({
+                                    initialPrompts: [
+                                        { role: 'system', content: 'You are a helpful assistant. The user will ask you questions about the provided text.' },
+                                        { role: 'user', content: payload.text } // The PDF text
+                                    ].concat(payload.history)
+                                });
+                                console.log("Chat session created.");
+                            }
+
+                            const stream = await window.chatSession.promptStreaming(payload.question);
+                            const reader = stream.getReader();
+                            while (true) {
+                                const { done, value } = await reader.read();
+                                if (done) {
+                                    sendMessage({ status: 'ama_complete' });
+                                    break;
+                                }
+                                sendMessage({ status: 'ama_chunk', data: value });
+                            }
+                        } else {
+                            sendMessage({ status: 'error', data: `Chat model not available. Status: ${availability}` });
+                        }
+                    } else {
+                        sendMessage({ status: 'error', data: "LanguageModel API not found." });
+                    }
                 }
             } catch (error) { sendMessage({ status: 'error', data: `AI Processing Failed: ${error.message}` }); }
         });
@@ -122,11 +148,12 @@ document.addEventListener('DOMContentLoaded', () => {
     };
     
     chrome.runtime.onMessage.addListener((message) => {
+        print("Received message:", message);
         if (message.text) pdfText = message.text;
         switch (message.status) {
             case 'headline_success': if (headlineContent) headlineContent.textContent = message.data; break;
-            case 'tldr_success': if (tldrContent) tldrContent.textContent = message.data; break;
-            case 'teaser_success': if (teaserContent) teaserContent.textContent = message.data; break;
+            case 'tldr_success': if (tldrContent) tldrContent.textContent = message.data; console.log('tldrContent is', tldrContent); break;
+            case 'teaser_success': if (teaserContent) teaserContent.textContent = message.data; console.log('tldrContent is', tldrContent); break;
             case 'keypoints_success': if (keyPointsContent) { keyPointsContent.innerHTML = ''; message.data.split('\n').filter(p => p.trim().length > 0).forEach(point => { const li = document.createElement('li'); li.textContent = point.replace(/^- /, '').trim(); keyPointsContent.appendChild(li); }); } break;
             case 'ama_chunk': let lastMessage = chatMessages.lastElementChild; if (!lastMessage || !lastMessage.classList.contains('bot-message')) { addMessage('', 'bot'); lastMessage = chatMessages.lastElementChild; } lastMessage.querySelector('.bubble').textContent += message.data; chatMessages.scrollTop = chatMessages.scrollHeight; break;
             case 'ama_complete': const finalAnswer = chatMessages.lastElementChild.querySelector('.bubble').textContent; chatHistory.push({ role: 'bot', content: finalAnswer }); break;
