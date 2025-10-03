@@ -1,235 +1,93 @@
 document.addEventListener('DOMContentLoaded', () => {
-    // --- DOM ELEMENTS ---
-    const tabs = document.querySelectorAll('.tab-button');
-    const tabContents = document.querySelectorAll('.tab-content');
-    const headlineContent = document.getElementById('headline-content');
-    const tldrContent = document.getElementById('tldr-content');
-    const teaserContent = document.getElementById('teaser-content');
-    const keyPointsContent = document.getElementById('key-points-content');
-    const chatMessages = document.getElementById('chat-messages');
-    const chatInput = document.getElementById('chat-input');
-    const chatSend = document.getElementById('chat-send');
-    const statusDiv = document.getElementById('status');
-    const progressContainer = document.getElementById('progress-container');
-    const progressBarInner = document.getElementById('progress-bar-inner');
-    const progressLabel = document.getElementById('progress-label');
+  // --- DOM ELEMENTS ---
+  const chatMessages = document.getElementById('chat-messages');
+  const chatInput = document.getElementById('chat-input');
+  const chatSend = document.getElementById('chat-send');
+  const statusMessage = document.getElementById('status-message');
 
-    // --- STATE ---
-    let pdfText = '';
-    let chatHistory = [];
-    
-    // --- TAB HANDLING ---
-    tabs.forEach(tab => {
-        tab.addEventListener('click', () => {
-            tabs.forEach(t => t.classList.remove('active'));
-            tab.classList.add('active');
-            tabContents.forEach(content => content.classList.toggle('active', content.id === tab.dataset.tab));
-        });
-    });
+  // --- UI Functions ---
+  const addMessage = (content, sender) => {
+    const messageElement = document.createElement('div');
+    messageElement.classList.add('chat-message', `${sender}-message`);
+    const bubble = document.createElement('p');
+    bubble.classList.add('bubble');
+    bubble.textContent = content;
+    messageElement.appendChild(bubble);
+    chatMessages.appendChild(messageElement);
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+    return messageElement;
+  };
 
-    // --- INJECTED SCRIPTS ---
-    const mainWorldAiWorker = () => {
-        if (window.pdfAmaWorkerLoaded) return;
-        window.pdfAmaWorkerLoaded = true;
+  const setUIState = (state, message) => {
+    statusMessage.textContent = message;
+    if (state === 'loading') {
+      chatInput.disabled = true;
+      chatSend.disabled = true;
+    } else if (state === 'ready') {
+      chatInput.disabled = false;
+      chatSend.disabled = false;
+      chatInput.focus();
+    } else if (state === 'thinking') {
+      chatInput.disabled = true;
+      chatSend.disabled = true;
+    }
+  };
 
-        const sendMessage = (detail) => window.dispatchEvent(new CustomEvent('PDFAMA_RESPONSE', { detail }));
+  // --- Event Handlers ---
+  const handleUserMessage = () => {
+    const question = chatInput.value.trim();
+    if (question) {
+      addMessage(question, 'user');
+      setUIState('thinking', 'Thinking...');
+      chrome.runtime.sendMessage({ type: 'ask-question', question: question });
+      chatInput.value = '';
+    }
+  };
 
-        window.addEventListener('PDFAMA_REQUEST', async (event) => {
-            const { type, payload } = event.detail;
-            try {
-                if (!payload.text || payload.text.length < 10) {
-                     sendMessage({ status: 'error', data: 'AI Worker received empty or invalid text.' });
-                     return;
-                }
-                const text = payload.text;
-                if (type === 'summarize') {
-                    if ('Summarizer' in self) {
-                        const availability = await self.Summarizer.availability();
-                        console.log("availability is", availability);
-                        if (availability === 'available' || availability === 'downloadable') {
-                            
-                            // Sequential calls to prevent race conditions
-                            console.log("Creating headline summarizer...");
-                            const headlineSummarizer = await self.Summarizer.create({ monitor: (m) => m.addEventListener('downloadprogress', (e) => sendMessage({ status: 'progress', data: e.loaded})), 'type': 'headline', 'format': 'markdown', 'length': 'short'});
-                            console.log("Headline summarizer created.");
+  chatSend.addEventListener('click', handleUserMessage);
+  chatInput.addEventListener('keypress', (e) => {
+    if (e.key === 'Enter') handleUserMessage();
+  });
 
-                            console.log("Creating TLDR summarizer...");
-                            const tldrSummarizer = await self.Summarizer.create({ 'type': 'tldr', 'format': 'markdown', 'length': 'medium'});
-                            console.log("TLDR summarizer created.");
+  // --- Message Listener from Service Worker ---
+  chrome.runtime.onMessage.addListener((message) => {
+    let lastMessageElement;
+    switch (message.type) {
+      case 'status-update':
+        setUIState('loading', message.message);
+        break;
+      
+      case 'ai-initialized':
+        setUIState('ready', 'Ready to chat.');
+        break;
 
-                            console.log("Creating Teaser summarizer...");
-                            const teaserSummarizer = await self.Summarizer.create({ 'type': 'teaser', 'format': 'markdown', 'length': 'medium'});
-                            console.log("teaser summarizer created.");                            
+      case 'init-chat':
+        chatMessages.innerHTML = '';
+        message.history.forEach(msg => addMessage(msg.content, msg.role));
+        setUIState('ready', 'Ready to chat.');
+        break;
 
-                            console.log("Creating Key Points summarizer...");
-                            const keyPointsSummarizer = await self.Summarizer.create({ 'type': 'key-points', 'format': 'markdown', 'length': 'long'});
-                            console.log("Key Points summarizer created.");
-
-                            const headlinePromise = headlineSummarizer.summarize(text).then(headline => {
-                                console.log("headline is", headline);
-                                sendMessage({ status: 'headline_success', data: headline, text: text });
-                            }).catch(e => sendMessage({ status: 'error', data: `Headline summarization failed: ${e.message}` }));
-
-                            const tldrPromise = tldrSummarizer.summarize(text).then(tldr => {
-                                console.log("tldr is", tldr);
-                                sendMessage({ status: 'tldr_success', data: tldr });
-                            }).catch(e => sendMessage({ status: 'error', data: `TLDR summarization failed: ${e.message}` }));
-
-                            const teaserPromise = teaserSummarizer.summarize(text).then(teaser => {
-                                console.log("teaser is", teaser);
-                                sendMessage({ status: 'teaser_success', data: teaser });
-                            }).catch(e => sendMessage({ status: 'error', data: `Teaser summarization failed: ${e.message}` }));
-
-
-                            const keyPointsPromise = keyPointsSummarizer.summarize(text).then(keyPoints => {
-                                console.log("keyPoints is", keyPoints);
-                                sendMessage({ status: 'keypoints_success', data: keyPoints });
-                            }).catch(e => sendMessage({ status: 'error', data: `Key points summarization failed: ${e.message}` }));
-
-                            await Promise.all([headlinePromise, tldrPromise, keyPointsPromise]);
-
-                        } else { sendMessage({ status: 'error', data: `Model not available. Status: ${availability}` }); }
-                    } else { sendMessage({ status: 'error', data: "Summarizer API not found." }); }
-                } else if (type === 'ama') {
-                    if ('LanguageModel' in self) {
-                        const availability = await self.LanguageModel.availability();
-                        if (availability === 'available' || availability === 'downloadable') {
-                            if (!window.chatSession) {
-                                console.log("Creating chat session...");
-                                window.chatSession = await self.LanguageModel.create({
-                                    initialPrompts: [
-                                        { role: 'system', content: 'You are a helpful assistant. The user will ask you questions about the provided text.' },
-                                        { role: 'user', content: payload.text } // The PDF text
-                                    ].concat(payload.history)
-                                });
-                                console.log("Chat session created.");
-                            }
-
-                            const stream = await window.chatSession.promptStreaming(payload.question);
-                            const reader = stream.getReader();
-                            while (true) {
-                                const { done, value } = await reader.read();
-                                if (done) {
-                                    sendMessage({ status: 'ama_complete' });
-                                    break;
-                                }
-                                sendMessage({ status: 'ama_chunk', data: value });
-                            }
-                        } else {
-                            sendMessage({ status: 'error', data: `Chat model not available. Status: ${availability}` });
-                        }
-                    } else {
-                        sendMessage({ status: 'error', data: "LanguageModel API not found." });
-                    }
-                }
-            } catch (error) { sendMessage({ status: 'error', data: `AI Processing Failed: ${error.message}` }); }
-        });
-    };
-
-    const dispatchRequestToWorker = (request) => {
-        window.dispatchEvent(new CustomEvent('PDFAMA_REQUEST', { detail: request }));
-    };
-
-    const isolatedWorldListener = () => {
-        window.addEventListener('PDFAMA_RESPONSE', (event) => {
-            chrome.runtime.sendMessage(event.detail);
-        });
-    };
-
-    // --- UI & MESSAGE HANDLING ---
-    const addMessage = (message, sender) => {
-        const messageElement = document.createElement('div');
-        messageElement.classList.add('chat-message', `${sender}-message`);
-        const bubble = document.createElement('p');
-        bubble.classList.add('bubble');
-        bubble.textContent = message;
-        messageElement.appendChild(bubble);
-        if (chatMessages) { chatMessages.appendChild(messageElement); chatMessages.scrollTop = chatMessages.scrollHeight; }
-    };
-    
-    chrome.runtime.onMessage.addListener((message) => {
-        print("Received message:", message);
-        if (message.text) pdfText = message.text;
-        switch (message.status) {
-            case 'headline_success': if (headlineContent) headlineContent.textContent = message.data; break;
-            case 'tldr_success': if (tldrContent) tldrContent.textContent = message.data; console.log('tldrContent is', tldrContent); break;
-            case 'teaser_success': if (teaserContent) teaserContent.textContent = message.data; console.log('tldrContent is', tldrContent); break;
-            case 'keypoints_success': if (keyPointsContent) { keyPointsContent.innerHTML = ''; message.data.split('\n').filter(p => p.trim().length > 0).forEach(point => { const li = document.createElement('li'); li.textContent = point.replace(/^- /, '').trim(); keyPointsContent.appendChild(li); }); } break;
-            case 'ama_chunk': let lastMessage = chatMessages.lastElementChild; if (!lastMessage || !lastMessage.classList.contains('bot-message')) { addMessage('', 'bot'); lastMessage = chatMessages.lastElementChild; } lastMessage.querySelector('.bubble').textContent += message.data; chatMessages.scrollTop = chatMessages.scrollHeight; break;
-            case 'ama_complete': const finalAnswer = chatMessages.lastElementChild.querySelector('.bubble').textContent; chatHistory.push({ role: 'bot', content: finalAnswer }); break;
-            case 'progress': if (progressContainer) progressContainer.style.display = 'block'; const percent = Math.round(message.data * 100); if (progressLabel) progressLabel.textContent = `Downloading AI Model... ${percent}%`; if (progressBarInner) progressBarInner.style.width = `${percent}%`; break;
-            case 'error': if (statusDiv) statusDiv.textContent = `Error: ${message.data}`; addMessage(`Error: ${message.data}`, 'bot'); break;
-            case 'info': if (statusDiv) statusDiv.textContent = message.data; break;
+      case 'ama-chunk':
+        lastMessageElement = chatMessages.lastElementChild;
+        if (!lastMessageElement || !lastMessageElement.classList.contains('bot-message')) {
+          lastMessageElement = addMessage('', 'bot');
         }
-    });
+        lastMessageElement.querySelector('.bubble').textContent += message.chunk;
+        chatMessages.scrollTop = chatMessages.scrollHeight;
+        break;
+      
+      case 'ama-complete':
+        setUIState('ready', 'Ready to chat.');
+        break;
 
-    const handleUserMessage = async () => {
-        if (!chatInput || !pdfText) {
-            addMessage("Error: The PDF has not been fully processed yet.", "bot");
-            return;
-        }
-        const question = chatInput.value.trim();
-        if (question) {
-            addMessage(question, 'user');
-            chatHistory.push({ role: 'user', content: question });
-            chatInput.value = '';
-            const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-            const request = { type: 'ama', payload: { history: chatHistory, question: question, text: pdfText } };
-            await chrome.scripting.executeScript({
-                target: { tabId: tab.id },
-                func: dispatchRequestToWorker,
-                args: [request],
-                world: 'MAIN'
-            });
-        }
-    };
+      case 'error':
+        addMessage(`Error: ${message.message}`, 'bot');
+        setUIState('ready', 'You can try asking another question.');
+        break;
+    }
+  });
 
-    if (chatSend) chatSend.addEventListener('click', handleUserMessage);
-    if (chatInput) chatInput.addEventListener('keypress', (e) => {
-        if (e.key === 'Enter') handleUserMessage();
-    });
-
-    // --- INITIALIZATION ---
-    const init = async () => {
-        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-        const isPdf = tab && tab.url && (tab.url.endsWith('.pdf') || (tab.url.startsWith('file:') && tab.title.endsWith('.pdf')));
-        if (isPdf) {
-            try {
-                if (statusDiv) statusDiv.textContent = 'Setting up listeners...';
-                await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: mainWorldAiWorker, world: 'MAIN' });
-                await chrome.scripting.executeScript({ target: { tabId: tab.id }, func: isolatedWorldListener });
-
-                if (statusDiv) statusDiv.textContent = 'Parsing PDF...';
-                const response = await fetch(tab.url);
-                const pdfArrayBuffer = await response.arrayBuffer();
-                const pdfjsLibUrl = chrome.runtime.getURL('lib/pdfjs/build/pdf.mjs');
-                const pdfjsWorkerUrl = chrome.runtime.getURL('lib/pdfjs/build/pdf.worker.mjs');
-                const { getDocument, GlobalWorkerOptions } = await import(pdfjsLibUrl);
-                GlobalWorkerOptions.workerSrc = pdfjsWorkerUrl;
-                const pdf = await getDocument(pdfArrayBuffer).promise;
-                let textContent = '';
-                for (let i = 1; i <= pdf.numPages; i++) {
-                    textContent += (await (await pdf.getPage(i)).getTextContent()).items.map(item => item.str).join(' ');
-                }
-                pdfText = textContent;
-
-                if (statusDiv) statusDiv.textContent = 'Generating summaries...';
-                const request = { type: 'summarize', payload: { text: pdfText } };
-                await chrome.scripting.executeScript({
-                    target: { tabId: tab.id },
-                    func: dispatchRequestToWorker,
-                    args: [request],
-                    world: 'MAIN'
-                });
-
-            } catch (e) {
-                console.error("Initialization error:", e);
-                if (statusDiv) statusDiv.textContent = `Fatal Error: ${e.message}`;
-            }
-        } else {
-            if (statusDiv) statusDiv.textContent = 'Open a PDF to begin.';
-        }
-    };
-
-    init();
+  // --- Initialization ---
+  setUIState('loading', 'Loading...');
+  chrome.runtime.sendMessage({ type: 'sidebar-loaded' });
 });
