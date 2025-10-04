@@ -36,7 +36,7 @@ async function setupOffscreenDocument(path) {
 // The listener remains async, which is the correct and stable pattern.
 chrome.runtime.onMessage.addListener(async (message, sender) => {
   // Relay messages from the Engine Room (offscreen) to the Sidebar
-  if (['status-update', 'error', 'ama-chunk', 'ama-complete', 'init-chat'].includes(message.type)) {
+  if (['status-update', 'error', 'ama-complete', 'init-chat'].includes(message.type)) {
     chrome.runtime.sendMessage(message);
     return;
   }
