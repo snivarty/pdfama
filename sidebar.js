@@ -5,6 +5,8 @@ document.addEventListener('DOMContentLoaded', () => {
   const chatSend = document.getElementById('chat-send');
   const statusMessage = document.getElementById('status-message');
 
+  let chatHistory = [];
+
   // --- UI Functions ---
   const addMessage = (content, sender) => {
     const messageElement = document.createElement('div');
@@ -70,16 +72,27 @@ document.addEventListener('DOMContentLoaded', () => {
 
       case 'ama-chunk':
         lastMessageElement = chatMessages.lastElementChild;
+        // If there's no last message or it's not a bot message, create a new one.
         if (!lastMessageElement || !lastMessageElement.classList.contains('bot-message')) {
           lastMessageElement = addMessage('', 'bot');
+          // Add a temporary property to store the raw markdown
+          lastMessageElement.querySelector('.bubble')._markdownContent = '';
         }
-        console.log("[pdfAMA Sidebar]: Received chunk:", message.chunk);
-        lastMessageElement.querySelector('.bubble').textContent += message.chunk;
+        const bubble = lastMessageElement.querySelector('.bubble');
+        // Append the raw markdown chunk to our stored property
+        bubble._markdownContent += message.chunk;
+        // Render the complete markdown string into the bubble as HTML
+        bubble.innerHTML = marked.parse(bubble._markdownContent);
         chatMessages.scrollTop = chatMessages.scrollHeight;
         break;
       
       case 'ama-complete':
-        setUIState('ready', 'Ready to chat.');
+        const finalBubble = chatMessages.lastElementChild.querySelector('.bubble');
+        // Do one final render to catch any trailing markdown formatting
+        finalBubble.innerHTML = marked.parse(finalBubble._markdownContent);
+        // Add the raw markdown to our history for consistency
+        chatHistory.push({ role: 'bot', content: finalBubble._markdownContent });
+        setUIState('ready');
         break;
 
       case 'error':

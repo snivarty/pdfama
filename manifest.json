@@ -38,7 +38,8 @@
     {
       "resources": [
         "lib/pdfjs/build/pdf.mjs",
-        "lib/pdfjs/build/pdf.worker.mjs"
+        "lib/pdfjs/build/pdf.worker.mjs",
+        "lib/marked/marked.min.js"
       ],
       "matches": [
         "<all_urls>"
