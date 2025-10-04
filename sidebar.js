@@ -44,13 +44,14 @@ document.addEventListener('DOMContentLoaded', () => {
       //console.log("[pdfAMA Sidebar]: Sending question to background:", question);
       chrome.runtime.sendMessage({ type: 'ask-question', question: question });
       chatInput.value = '';
+      chatSend.disabled = true;
     }
   };
 
   chatSend.addEventListener('click', handleUserMessage);
-  chatInput.addEventListener('keypress', (e) => {
+  /* chatInput.addEventListener('keypress', (e) => {
     if (e.key === 'Enter') handleUserMessage();
-  });
+  }); */
 
   // --- Message Listener from Service Worker ---
   chrome.runtime.onMessage.addListener((message) => {
@@ -101,6 +102,18 @@ document.addEventListener('DOMContentLoaded', () => {
         break;
     }
   });
+
+// Enter/Shift+Enter handling
+chatInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();   // prevent newline
+    chatSend.click();     // trigger send
+  }
+});
+
+chatInput.addEventListener('input', () => {
+  chatSend.disabled = chatInput.value.trim().length === 0;
+});
 
   // --- Initialization ---
   setUIState('loading', 'Loading...');

@@ -2,6 +2,7 @@
 <html>
 <head>
   <title>pdfAMA</title>
+  <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
   <link rel="stylesheet" href="sidebar.css">
 </head>
 <body>
@@ -11,10 +12,12 @@
     </div>
     <div id="chat-container">
       <div id="chat-messages"></div>
-      <div id="chat-input-container">
-        <input type="text" id="chat-input" placeholder="Ask me anything" disabled>
-        <button id="chat-send" disabled>Send</button>
-      </div>
+        <div id="chat-input-container">
+          <textarea id="chat-input" placeholder="Ask me anything" rows="3"></textarea>
+          <button id="chat-send" disabled>
+            <span class="material-icons">send</span>
+          </button>
+        </div>
     </div>
   </div>
   <script src="lib/marked/marked.min.js"></script>
