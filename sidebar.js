@@ -39,6 +39,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (question) {
       addMessage(question, 'user');
       setUIState('thinking', 'Thinking...');
+      //console.log("[pdfAMA Sidebar]: Sending question to background:", question);
       chrome.runtime.sendMessage({ type: 'ask-question', question: question });
       chatInput.value = '';
     }
@@ -72,6 +73,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!lastMessageElement || !lastMessageElement.classList.contains('bot-message')) {
           lastMessageElement = addMessage('', 'bot');
         }
+        console.log("[pdfAMA Sidebar]: Received chunk:", message.chunk);
         lastMessageElement.querySelector('.bubble').textContent += message.chunk;
         chatMessages.scrollTop = chatMessages.scrollHeight;
         break;

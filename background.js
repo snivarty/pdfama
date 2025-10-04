@@ -53,8 +53,8 @@ chrome.runtime.onMessage.addListener(async (message, sender) => {
          chrome.runtime.sendMessage({ type: 'error', message: 'Cannot process this page. Please open a PDF from a web or local file address.' });
       }
     } else if (message.type === 'ask-question') {
-      // Forward the question directly to the engine room.
-      chrome.runtime.sendMessage(message);
+      console.log("[pdfAMA Doorman]: 'ask-question invoked, suppressing to Engine Room.");
+      //chrome.runtime.sendMessage(message);
     }
   } catch (error) {
      console.error("[pdfAMA Doorman]: CRITICAL ERROR setting up Engine Room:", error);

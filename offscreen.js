@@ -7,6 +7,7 @@ chrome.runtime.onMessage.addListener(async (message) => {
   if (message.type === 'start-processing') {
     await processPdfAndInitAi(message.url);
   } else if (message.type === 'ask-question') {
+    console.log("[pdfAMA Engine Room]: Received question:", message.question);
     await handleAskQuestion(message.question);
   }
 });
@@ -54,6 +55,7 @@ async function processPdfAndInitAi(url) {
 }
 
 async function handleAskQuestion(question) {
+    console.log("[pdfAMA Engine Room]: Received question:", question);
     if (!chatSession) {
         chrome.runtime.sendMessage({ type: 'error', message: 'AI session not ready.' });
         return;
@@ -62,6 +64,7 @@ async function handleAskQuestion(question) {
         const stream = await chatSession.promptStreaming(question);
         for await (const chunk of stream) {
             chrome.runtime.sendMessage({ type: 'ama-chunk', chunk: chunk });
+            console.log("[pdfAMA Engine Room]: Sent chunk:", chunk);
         }
         chrome.runtime.sendMessage({ type: 'ama-complete' });
     } catch (error) {
