@@ -102,7 +102,7 @@ h1 {
   margin-bottom: 10px;
 }
 
-.chat-message p.bubble {
+.chat-message .bubble {
   margin: 0;
   padding: 10px;
   border: solid 1px transparent; 
@@ -123,7 +123,7 @@ h1 {
 
 .user-message .bubble {
   color: white;
-  border-top-right-radius: 2px;
+  /* border-top-right-radius: 2px; */
   background-image: linear-gradient(#007bff, #007bff), var(--google-gradient);
   background-origin: border-box;
   background-clip: padding-box, border-box; /* change content-box → padding-box */
@@ -136,10 +136,17 @@ h1 {
 
 .bot-message .bubble {
   color: #333;
-  border-top-left-radius: 2px;
-  border: 1px solid transparent;  /* thicker border, gradient shows as thin line */
+  /* border-top-left-radius: 2px; */
+  border : 1px solid transparent;  /* thicker border, gradient shows as thin line */
   background-image: linear-gradient(#eee, #eee), var(--google-gradient);
   background-origin: border-box;
   background-clip: padding-box, border-box;
   padding: 10px;
+}
+
+.bubble p {
+  margin: 0 0 0.5em 0; /* no top margin, small bottom margin */
+}
+.bubble p:last-child {
+  margin-bottom: 0; /* no trailing gap at the end */
 }
