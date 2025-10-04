@@ -1,6 +1,7 @@
 // offscreen.js
 
 let chatSession;
+let abortController = null;
 
 // Listen for commands from the Butler (background.js)
 chrome.runtime.onMessage.addListener(async (message) => {
@@ -9,6 +10,12 @@ chrome.runtime.onMessage.addListener(async (message) => {
   } else if (message.type === 'ask-question') {
     console.log("[pdfAMA Engine Room]: Received question:", message.question);
     await handleAskQuestion(message.question);
+  } else if (message.type === 'terminate-chat') {      // NEW
+    console.log("[pdfAMA Engine Room]: Termination requested.");
+    if (abortController) {
+      abortController.abort();
+      abortController = null;
+    }
   }
 });
 
@@ -60,15 +67,29 @@ async function handleAskQuestion(question) {
         chrome.runtime.sendMessage({ type: 'error', message: 'AI session not ready.' });
         return;
     }
+      // NEW: create abort controller
+    abortController = new AbortController();
+    const { signal } = abortController;
     try {
-        const stream = await chatSession.promptStreaming(question);
+        const stream = await chatSession.promptStreaming(question, { signal });
         for await (const chunk of stream) {
+            if (signal.aborted) {
+                console.log("[pdfAMA Engine Room]: Streaming aborted.");
+                return;
+            }
             chrome.runtime.sendMessage({ type: 'ama-chunk', chunk: chunk });
             console.log("[pdfAMA Engine Room]: Sent chunk:", chunk);
         }
         chrome.runtime.sendMessage({ type: 'ama-complete' });
     } catch (error) {
-        console.error('[pdfAMA Engine Room]: AI Query Error:', error);
-        chrome.runtime.sendMessage({ type: 'error', message: `AI Error: ${error.message}` });
+        if (error.name === 'AbortError' || signal.aborted) {
+            console.log("[pdfAMA Engine Room]: Chat was aborted by user.");
+            chrome.runtime.sendMessage({ type: 'ama-terminated' });
+        } else {
+            console.error('[pdfAMA Engine Room]: AI Query Error:', error);
+            chrome.runtime.sendMessage({ type: 'error', message: `AI Error: ${error.message}` });
+        }
+    } finally {
+        abortController = null;
     }
 }

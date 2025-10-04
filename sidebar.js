@@ -3,9 +3,11 @@ document.addEventListener('DOMContentLoaded', () => {
   const chatMessages = document.getElementById('chat-messages');
   const chatInput = document.getElementById('chat-input');
   const chatSend = document.getElementById('chat-send');
+  const chatStop = document.getElementById('chat-stop');
   const statusMessage = document.getElementById('status-message');
 
   let chatHistory = [];
+  let isThinking = false;
 
   // --- UI Functions ---
   const addMessage = (content, sender) => {
@@ -25,33 +27,38 @@ document.addEventListener('DOMContentLoaded', () => {
     if (state === 'loading') {
       chatInput.disabled = true;
       chatSend.disabled = true;
+      chatStop.style.display = 'none';
     } else if (state === 'ready') {
       chatInput.disabled = false;
-      chatSend.disabled = false;
+      chatSend.disabled = chatInput.value.trim().length === 0; // only enable if content
+      chatSend.style.display = 'inline-flex';
+      chatStop.style.display = 'none';
       chatInput.focus();
+      isThinking = false;
     } else if (state === 'thinking') {
       chatInput.disabled = true;
-      chatSend.disabled = true;
+      chatSend.style.display = 'none';
+      chatStop.style.display = 'inline-flex';
+      isThinking = true;
     }
   };
 
   // --- Event Handlers ---
   const handleUserMessage = () => {
     const question = chatInput.value.trim();
-    if (question) {
+    if (question && !isThinking) {
       addMessage(question, 'user');
       setUIState('thinking', 'Thinking...');
-      //console.log("[pdfAMA Sidebar]: Sending question to background:", question);
+      isThinking = true;
       chrome.runtime.sendMessage({ type: 'ask-question', question: question });
       chatInput.value = '';
       chatSend.disabled = true;
+    } else if (isThinking) {
+      chrome.runtime.sendMessage({ type: 'terminate-chat' });
+      setUIState('ready', 'Terminated. Ready for a new question.');
+      isThinking = false;
     }
   };
-
-  chatSend.addEventListener('click', handleUserMessage);
-  /* chatInput.addEventListener('keypress', (e) => {
-    if (e.key === 'Enter') handleUserMessage();
-  }); */
 
   // --- Message Listener from Service Worker ---
   chrome.runtime.onMessage.addListener((message) => {
@@ -73,47 +80,59 @@ document.addEventListener('DOMContentLoaded', () => {
 
       case 'ama-chunk':
         lastMessageElement = chatMessages.lastElementChild;
-        // If there's no last message or it's not a bot message, create a new one.
         if (!lastMessageElement || !lastMessageElement.classList.contains('bot-message')) {
           lastMessageElement = addMessage('', 'bot');
-          // Add a temporary property to store the raw markdown
           lastMessageElement.querySelector('.bubble')._markdownContent = '';
         }
         const bubble = lastMessageElement.querySelector('.bubble');
-        // Append the raw markdown chunk to our stored property
         bubble._markdownContent += message.chunk;
-        // Render the complete markdown string into the bubble as HTML
         bubble.innerHTML = marked.parse(bubble._markdownContent);
         chatMessages.scrollTop = chatMessages.scrollHeight;
         break;
       
       case 'ama-complete':
         const finalBubble = chatMessages.lastElementChild.querySelector('.bubble');
-        // Do one final render to catch any trailing markdown formatting
         finalBubble.innerHTML = marked.parse(finalBubble._markdownContent);
-        // Add the raw markdown to our history for consistency
         chatHistory.push({ role: 'bot', content: finalBubble._markdownContent });
         setUIState('ready');
+        isThinking = false;
+        break;
+
+      case 'ama-terminated':
+        console.log("[pdfAMA]: Chat was terminated by user.");
+        setUIState('ready', 'Terminated. Ready for a new question.');
+        isThinking = false;
         break;
 
       case 'error':
         addMessage(`Error: ${message.message}`, 'bot');
         setUIState('ready', 'You can try asking another question.');
+        isThinking = false;
         break;
     }
   });
 
-// Enter/Shift+Enter handling
-chatInput.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' && !e.shiftKey) {
-    e.preventDefault();   // prevent newline
-    chatSend.click();     // trigger send
-  }
-});
+  // --- Input & Button Events ---
+  chatSend.addEventListener('click', handleUserMessage);
 
-chatInput.addEventListener('input', () => {
-  chatSend.disabled = chatInput.value.trim().length === 0;
-});
+  chatInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleUserMessage();
+    }
+  });
+
+  chatInput.addEventListener('input', () => {
+    chatSend.disabled = chatInput.value.trim().length === 0;
+  });
+
+  chatStop.addEventListener('click', () => {
+    if (isThinking) {
+      chrome.runtime.sendMessage({ type: 'terminate-chat' });
+      setUIState('ready', 'Terminated. Ready for a new question.');
+      isThinking = false;
+    }
+  });
 
   // --- Initialization ---
   setUIState('loading', 'Loading...');

@@ -84,40 +84,22 @@ h1 {
 
 /* --- THE SEND BUTTON: REVERTED TO CLASSIC STYLE --- */
 #chat-send {
-  position: absolute;
-  right: 8px;
-  bottom: 8px;
-  background: none;
-  border: none;
-  cursor: pointer;
-  padding: 0;
-  display: flex;
-  /* font-size: 18px; 
-  color: #007bff; */
-  align-items: center;
-  justify-content: center;
+  background-color: #007bff;
+  color: white;
 }
-
-#chat-send .material-icons {
-  font-size: 20px;
-  color: #007bff; /* blue */
-}
-
-#chat-send:disabled .material-icons {
-  color: #bbb;   /* grey when disabled */
-  cursor: not-allowed;
-}
-
 #chat-send:disabled {
-  color: #bbb !important;   /* grey when disabled */
+  background-color: #bbb;
   cursor: not-allowed;
-  pointer-events: none;
 }
 
-#chat-send:hover:not(:disabled) {
-    background-color: #0056b3;
+#chat-stop {
+  background-color: #dc3545; /* red */
+  color: white;
 }
 
+#chat-buttons .material-icons {
+  font-size: 20px;
+}
 
 /* --- THE CHAT BUBBLES: CORRECTED AND FINAL --- */
 .chat-message {
@@ -175,3 +157,21 @@ h1 {
 }
 
 
+#chat-buttons {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  display: flex;
+  gap: 6px;
+}
+
+#chat-buttons button {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
