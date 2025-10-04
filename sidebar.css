@@ -1,5 +1,14 @@
+/* Import the correct font at the absolute top */
+@import url('https://fonts.googleapis.com/css2?family=Lato:wght@400;700&display=swap');
+
+/* Define the color palette for the entire file */
+:root {
+  --google-gradient: linear-gradient(90deg, #4285F4, #EA4335, #FBBC05, #34A853);
+}
+
+/* Apply the font and establish a stable layout foundation */
 body {
-  font-family: sans-serif;
+  font-family: 'Lato', sans-serif;
   width: 350px;
   padding: 10px;
   margin: 0;
@@ -36,7 +45,7 @@ h1 {
   display: flex;
   flex-direction: column;
   flex-grow: 1;
-  overflow: hidden; /* Prevents container from overflowing body */
+  overflow: hidden;
 }
 
 #chat-messages {
@@ -58,12 +67,14 @@ h1 {
   border: 1px solid #ccc;
   border-radius: 5px;
   padding: 8px;
+  font-family: 'Lato', sans-serif;
 }
 
 #chat-input:disabled {
   background-color: #f0f0f0;
 }
 
+/* --- THE SEND BUTTON: REVERTED TO CLASSIC STYLE --- */
 #chat-send {
   background-color: #007bff;
   color: white;
@@ -72,6 +83,7 @@ h1 {
   padding: 8px 12px;
   margin-left: 10px;
   cursor: pointer;
+  transition: background-color 0.2s;
 }
 
 #chat-send:disabled {
@@ -79,6 +91,12 @@ h1 {
   cursor: not-allowed;
 }
 
+#chat-send:hover:not(:disabled) {
+    background-color: #0056b3;
+}
+
+
+/* --- THE CHAT BUBBLES: CORRECTED AND FINAL --- */
 .chat-message {
   display: flex;
   margin-bottom: 10px;
@@ -87,25 +105,41 @@ h1 {
 .chat-message p.bubble {
   margin: 0;
   padding: 10px;
+  border: solid 1px transparent; 
   border-radius: 15px;
   max-width: 85%;
   word-wrap: break-word;
+  /* Establishes the stacking context for the glow */
+  position: relative; 
+  z-index: 1;
+  font-size: 15px;
+  line-height: 1.4;
 }
+
 
 .user-message {
   justify-content: flex-end;
 }
+
 .user-message .bubble {
-  background-color: #007bff;
   color: white;
   border-top-right-radius: 2px;
+  background-image: linear-gradient(#007bff, #007bff), var(--google-gradient);
+  background-origin: border-box;
+  background-clip: padding-box, border-box; /* change content-box → padding-box */
 }
+
 
 .bot-message {
   justify-content: flex-start;
 }
+
 .bot-message .bubble {
-  background-color: #eee;
   color: #333;
   border-top-left-radius: 2px;
+  border: 1px solid transparent;  /* thicker border, gradient shows as thin line */
+  background-image: linear-gradient(#eee, #eee), var(--google-gradient);
+  background-origin: border-box;
+  background-clip: padding-box, border-box;
+  padding: 10px;
 }
