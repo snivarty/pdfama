@@ -41,13 +41,21 @@ async function processPdfAndInitAi(url) {
 
     // Step 2: Initialize the AI
     if (!self.LanguageModel) throw new Error("LanguageModel API not available.");
-    const availability = await self.LanguageModel.availability();
+    const availability = await self.LanguageModel.availability({expectedOutputs: [
+        { type: "text", languages: ["en"] }
+      ]});
     if (availability !== 'available') throw new Error(`AI model not available: ${availability}`);
     
     chatSession = await self.LanguageModel.create({
       initialPrompts: [
         { role: 'system', content: 'You are a helpful assistant. Answer based *only* on the provided text.' },
         { role: 'user', content: textContent }
+      ],
+      expectedInputs: [
+        { type: "text", languages: ["en"] }
+      ],
+      expectedOutputs: [
+        { type: "text", languages: ["en"] }
       ]
     });
     
