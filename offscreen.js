@@ -10,7 +10,7 @@ const TOKEN_LIMIT = 32000; // A conservative token limit for Gemini Nano
 const EMBEDDING_MODEL = 'Xenova/all-MiniLM-L6-v2';
 
 // VectorDB specific configuration
-const DB_NAME = 'pdfAMAVectorDB';
+const DB_PREFIX = 'pdfAMA_'; // Prefix for all PDF databases
 const OBJECT_STORE_NAME = 'pdfVectors';
 const VECTOR_PROPERTY_NAME = 'embedding'; // The property name within the stored object that holds the vector
 
@@ -22,6 +22,23 @@ let ragPipeline = null; // Will hold the RAG pipeline for large documents
 // --- ENVIRONMENT SETUP ---
 // Skip local model checks for a streamlined setup.
 env.allowLocalModels = false;
+
+// --- UTILITY FUNCTIONS ---
+/**
+ * Generates a simple, stable hash from a string.
+ * Used to create unique database names from PDF URLs.
+ * @param {string} str The input string (e.g., PDF URL).
+ * @returns {string} A hash string.
+ */
+function hashString(str) {
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) {
+        const char = str.charCodeAt(i);
+        hash = ((hash << 5) - hash) + char;
+        hash |= 0; // Convert to 32bit integer
+    }
+    return Math.abs(hash).toString(36); // Convert to base36 string
+}
 
 // --- CUSTOM TEXT SPLITTER ---
 class RecursiveCharacterTextSplitter {
@@ -118,9 +135,9 @@ class RecursiveCharacterTextSplitter {
  * Manages the entire RAG (Retrieval-Augmented Generation) pipeline.
  */
 class RagPipeline {
-    constructor(text) {
+    constructor(text, existingVectorStore = null) {
         this.text = text;
-        this.vectorStore = null;
+        this.vectorStore = existingVectorStore; // Can be pre-initialized
         this.embedder = null;
     }
 
@@ -131,34 +148,37 @@ class RagPipeline {
         chrome.runtime.sendMessage({ type: 'status-update', message: 'Initializing AI model...' });
         this.embedder = await pipeline('feature-extraction', EMBEDDING_MODEL);
 
-        chrome.runtime.sendMessage({ type: 'status-update', message: 'Chunking document...' });
-        const splitter = new RecursiveCharacterTextSplitter({
-            chunkSize: CHUNK_SIZE,
-            chunkOverlap: CHUNK_OVERLAP,
-        });
-        const chunks = await splitter.splitText(this.text);
-
-        chrome.runtime.sendMessage({ type: 'status-update', message: 'Creating vector store...' });
-        this.vectorStore = new VectorDB({
-            dbName: DB_NAME,
-            objectStore: OBJECT_STORE_NAME,
-            vectorPath: VECTOR_PROPERTY_NAME,
-            vectorDimensions: 384 // Dimensions for all-MiniLM-L6-v2
-        });
-
-        chrome.runtime.sendMessage({ type: 'status-update', message: 'Generating embeddings (this may take a while)...' });
-        let processedChunks = 0;
-        for (const chunk of chunks) {
-            const embedding = await this.embedder(chunk, { pooling: 'mean', normalize: true });
-            // VectorDB expects an object with the vector at 'vectorPath', and the vector must be a standard Array.
-            await this.vectorStore.insert({
-                text: chunk, // Store the original text chunk
-                [VECTOR_PROPERTY_NAME]: Array.from(embedding.data) // Convert TypedArray to Array
+        if (!this.vectorStore) { // Only create if not provided
+            chrome.runtime.sendMessage({ type: 'status-update', message: 'Creating vector store...' });
+            this.vectorStore = new VectorDB({
+                dbName: DB_PREFIX + hashString(this.text), // Use a hash of the text for the DB name
+                objectStore: OBJECT_STORE_NAME,
+                vectorPath: VECTOR_PROPERTY_NAME,
+                vectorDimensions: 384 // Dimensions for all-MiniLM-L6-v2
             });
-            processedChunks++;
-            if (processedChunks % 10 === 0) { // Update every 10 chunks
-                 chrome.runtime.sendMessage({ type: 'status-update', message: `Embedding... (${processedChunks}/${chunks.length})` });
+
+            chrome.runtime.sendMessage({ type: 'status-update', message: 'Chunking document...' });
+            const splitter = new RecursiveCharacterTextSplitter({
+                chunkSize: CHUNK_SIZE,
+                chunkOverlap: CHUNK_OVERLAP,
+            });
+            const chunks = await splitter.splitText(this.text);
+
+            chrome.runtime.sendMessage({ type: 'status-update', message: 'Generating embeddings (this may take a while)...' });
+            let processedChunks = 0;
+            for (const chunk of chunks) {
+                const embedding = await this.embedder(chunk, { pooling: 'mean', normalize: true });
+                await this.vectorStore.insert({
+                    text: chunk,
+                    [VECTOR_PROPERTY_NAME]: Array.from(embedding.data)
+                });
+                processedChunks++;
+                if (processedChunks % 10 === 0) {
+                     chrome.runtime.sendMessage({ type: 'status-update', message: `Embedding... (${processedChunks}/${chunks.length})` });
+                }
             }
+        } else {
+            chrome.runtime.sendMessage({ type: 'status-update', message: 'Re-using existing embeddings.' });
         }
     }
 
@@ -168,9 +188,11 @@ class RagPipeline {
      * @returns {Promise<string>} The retrieved context.
      */
     async retrieve(query) {
+        if (!this.embedder) { // Ensure embedder is initialized for retrieval
+            this.embedder = await pipeline('feature-extraction', EMBEDDING_MODEL);
+        }
         const queryEmbedding = await this.embedder(query, { pooling: 'mean', normalize: true });
-        // VectorDB's query method returns objects with 'object' and 'similarity'
-        const results = await this.vectorStore.query(queryEmbedding.data, { limit: 3 }); // Get top 3 results
+        const results = await this.vectorStore.query(queryEmbedding.data, { limit: 3 });
         return results.map(r => r.object.text).join('\n\n---\n\n');
     }
 }
@@ -221,7 +243,38 @@ async function processPdfAndInitAi(url) {
 
     if (textContent.length > TOKEN_LIMIT) {
         // --- RAG PATH for Large Documents ---
-        ragPipeline = new RagPipeline(textContent);
+        const dbName = DB_PREFIX + hashString(url); // Use URL hash for DB name
+        let existingVectorStore = null;
+
+        try {
+            // Attempt to open existing DB
+            const tempStore = new VectorDB({
+                dbName: dbName,
+                objectStore: OBJECT_STORE_NAME,
+                vectorPath: VECTOR_PROPERTY_NAME,
+                vectorDimensions: 384 // Must match the dimensions used during creation
+            });
+            // Check if the object store exists and has data
+            const db = await tempStore._db; // Access the internal promise for the DB
+            const transaction = db.transaction([OBJECT_STORE_NAME], "readonly");
+            const store = transaction.objectStore(OBJECT_STORE_NAME);
+            const count = await new Promise((resolve, reject) => {
+                const req = store.count();
+                req.onsuccess = () => resolve(req.result);
+                req.onerror = () => reject(req.error);
+            });
+
+            if (count > 0) {
+                existingVectorStore = tempStore;
+                console.log(`[pdfAMA Engine Room]: Re-using existing VectorDB for ${url}`);
+            } else {
+                console.log(`[pdfAMA Engine Room]: No existing embeddings found for ${url}. Creating new.`);
+            }
+        } catch (e) {
+            console.warn(`[pdfAMA Engine Room]: Could not open existing VectorDB for ${url}: ${e.message}. Creating new.`);
+        }
+
+        ragPipeline = new RagPipeline(textContent, existingVectorStore);
         await ragPipeline.init();
     } else {
         // --- Direct Path for Small Documents ---
