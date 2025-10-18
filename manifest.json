@@ -19,6 +19,10 @@
   "background": {
     "service_worker": "background.js"
   },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self';",
+    "worker_src": "'self' blob:;"
+  },
   "content_scripts": [
     {
       "matches": [
@@ -39,7 +43,10 @@
       "resources": [
         "lib/pdfjs/build/pdf.mjs",
         "lib/pdfjs/build/pdf.worker.mjs",
-        "lib/marked/marked.min.js"
+        "lib/pdfjs/build/pdfjs-worker-loader.js",
+        "lib/marked/marked.min.js",
+        "lib/transformers/transformers.min.js",
+        "lib/vectoridb/index.js"
       ],
       "matches": [
         "<all_urls>"
