@@ -1,4 +1,11 @@
-// offscreen.js
+// Establish connection to background
+const port = chrome.runtime.connect({ name: 'offscreen' });
+
+const COMPONENTS = {
+  SIDEBAR: 'sidebar',
+  BACKGROUND: 'background',
+  OFFSCREEN: 'offscreen'
+};
 
 import { VectorDB } from '/lib/vectoridb/index.js';
 import { pipeline, env } from '/lib/transformers/transformers.min.js';
@@ -118,23 +125,34 @@ class RagPipeline {
     }
 
     async init() {
-        chrome.runtime.sendMessage({ type: 'status-update', message: 'Initializing AI model...', url: this.url });
         this.embedder = await pipeline('feature-extraction', EMBEDDING_MODEL);
 
         const count = await this.vectorStore.count();
         if (count > 0) {
-            chrome.runtime.sendMessage({ type: 'status-update', message: 'Re-using existing embeddings.', url: this.url });
+
             return;
         }
 
-        chrome.runtime.sendMessage({ type: 'status-update', message: 'Chunking document...', url: this.url });
+        port.postMessage({
+          type: 'status-update',
+          from: COMPONENTS.OFFSCREEN,
+          to: COMPONENTS.SIDEBAR,
+          url: this.url,
+          data: { message: 'Chunking document...' }
+        });
         const splitter = new RecursiveCharacterTextSplitter({
             chunkSize: CHUNK_SIZE,
             chunkOverlap: CHUNK_OVERLAP,
         });
         const chunks = await splitter.splitText(this.text);
 
-        chrome.runtime.sendMessage({ type: 'status-update', message: 'Generating embeddings (this may take a while)...', url: this.url });
+        port.postMessage({
+          type: 'status-update',
+          from: COMPONENTS.OFFSCREEN,
+          to: COMPONENTS.SIDEBAR,
+          url: this.url,
+          data: { message: 'Generating embeddings (this may take a while)...' }
+        });
         let processedChunks = 0;
         for (const chunk of chunks) {
             const embedding = await this.embedder(chunk, { pooling: 'mean', normalize: true });
@@ -145,7 +163,13 @@ class RagPipeline {
             });
             processedChunks++;
             if (processedChunks % 10 === 0) {
-                chrome.runtime.sendMessage({ type: 'status-update', message: `Embedding... (${processedChunks}/${chunks.length})`, url: this.url });
+                port.postMessage({
+                  type: 'status-update',
+                  from: COMPONENTS.OFFSCREEN,
+                  to: COMPONENTS.SIDEBAR,
+                  url: this.url,
+                  data: { message: `Embedding... (${processedChunks}/${chunks.length})` }
+                });
             }
         }
     }
@@ -161,16 +185,29 @@ class RagPipeline {
 }
 
 // --- MESSAGE HANDLING ---
-chrome.runtime.onMessage.addListener(async (message) => {
-    if (message.type === 'start-processing') {
-        await processPdfAndInitAi(message.url);
-    } else if (message.type === 'ask-question') {
-        await handleAskQuestion(message.url, message.question);
-    } else if (message.type === 'terminate-chat') {
-        if (abortController) {
-            abortController.abort();
-            abortController = null;
-        }
+port.onMessage.addListener(async (message) => {
+    console.log("Offscreen received message:", message);
+    // Only process messages addressed to offscreen
+    if (message.to !== COMPONENTS.OFFSCREEN) {
+      console.log("Offscreen ignoring message not addressed to it:", message);
+      return;
+    }
+
+    console.log("Offscreen processing", message.type, "message");
+    switch (message.type) {
+        case 'start-processing':
+            await processPdfAndInitAi(message.data.url);
+            break;
+        case 'ask-question':
+            await handleAskQuestion(message.data.url, message.data.question);
+            break;
+        case 'terminate-chat':
+            console.log("Offscreen terminating chat");
+            if (abortController) {
+                abortController.abort();
+                abortController = null;
+            }
+            break;
     }
 });
 
@@ -180,12 +217,30 @@ async function processPdfAndInitAi(url) {
         if (session && session.text) {
             // No backward compatibility needed, assume 'assistant' role is correct
             // for existing sessions.
-            chrome.runtime.sendMessage({ type: 'status-update', message: 'Session found. Loading chat...', url });
-            chrome.runtime.sendMessage({ type: 'init-chat', history: session.chatHistory, url });
+            port.postMessage({
+              type: 'status-update',
+              from: COMPONENTS.OFFSCREEN,
+              to: COMPONENTS.SIDEBAR,
+              url,
+              data: { message: 'Session found. Loading chat...' }
+            });
+            port.postMessage({
+              type: 'init-chat',
+              from: COMPONENTS.OFFSCREEN,
+              to: COMPONENTS.SIDEBAR,
+              url,
+              data: { history: session.chatHistory }
+            });
             return;
         }
 
-        chrome.runtime.sendMessage({ type: 'status-update', message: 'Processing PDF...', url });
+        port.postMessage({
+          type: 'status-update',
+          from: COMPONENTS.OFFSCREEN,
+          to: COMPONENTS.SIDEBAR,
+          url,
+          data: { message: 'Processing PDF...' }
+        });
         const { getDocument, GlobalWorkerOptions } = await import(chrome.runtime.getURL('lib/pdfjs/build/pdf.mjs'));
         GlobalWorkerOptions.workerSrc = chrome.runtime.getURL('lib/pdfjs/build/pdfjs-worker-loader.js');
 
@@ -204,12 +259,30 @@ async function processPdfAndInitAi(url) {
         session = { url, text: textContent, chatHistory: [] };
         await saveSession(session);
 
-        chrome.runtime.sendMessage({ type: 'status-update', message: 'Ready to chat.', url });
-        chrome.runtime.sendMessage({ type: 'init-chat', history: [], url });
+        port.postMessage({
+          type: 'status-update',
+          from: COMPONENTS.OFFSCREEN,
+          to: COMPONENTS.SIDEBAR,
+          url,
+          data: { message: 'Ready to chat.' }
+        });
+        port.postMessage({
+          type: 'init-chat',
+          from: COMPONENTS.OFFSCREEN,
+          to: COMPONENTS.SIDEBAR,
+          url,
+          data: { history: [] }
+        });
 
     } catch (error) {
         console.error('[pdfAMA Engine Room]: CRITICAL ERROR:', error);
-        chrome.runtime.sendMessage({ type: 'error', message: error.message, url });
+        port.postMessage({
+          type: 'error',
+          from: COMPONENTS.OFFSCREEN,
+          to: COMPONENTS.SIDEBAR,
+          url,
+          data: { message: error.message }
+        });
     }
 }
 
@@ -230,7 +303,13 @@ async function handleAskQuestion(url, question) {
         let stream;
         if (session.text.length > TOKEN_LIMIT) {
             // --- RAG PATH ---
-            chrome.runtime.sendMessage({ type: 'status-update', message: 'Searching document...', url });
+            port.postMessage({
+              type: 'status-update',
+              from: COMPONENTS.OFFSCREEN,
+              to: COMPONENTS.SIDEBAR,
+              url,
+              data: { message: 'Searching document...' }
+            });
             const vectorStore = new VectorDB({
                 dbName: 'pdfAMA',
                 objectStore: VECTORS_STORE,
@@ -241,7 +320,7 @@ async function handleAskQuestion(url, question) {
             await rag.init();
             const context = await rag.retrieve(question);
             const augmentedPrompt = `Based on the following text, answer the question: "${question}"\n\n---\n\n${context}`;
-            
+
             const ragSession = await self.LanguageModel.create({
                  initialPrompts: [{ role: 'user', content: `You are a helpful assistant. Answer based *only* on the provided text. Here is the text: ${context}\n\nMy question is: ${question}` }],
                  expectedInputs: [{ type: "text", languages: ["en"] }],
@@ -270,20 +349,43 @@ async function handleAskQuestion(url, question) {
         let fullResponse = '';
         for await (const chunk of stream) {
             if (signal.aborted) return;
-            chrome.runtime.sendMessage({ type: 'ama-chunk', chunk, url });
+            console.log("Offscreen sent chunk for:", url);
+            port.postMessage({
+              type: 'ama-chunk',
+              from: COMPONENTS.OFFSCREEN,
+              to: COMPONENTS.SIDEBAR,
+              url,
+              data: { chunk }
+            });
             fullResponse += chunk;
         }
 
         session.chatHistory.push({ role: 'assistant', content: fullResponse });
         await saveSession(session);
-        chrome.runtime.sendMessage({ type: 'ama-complete', url });
+        port.postMessage({
+          type: 'ama-complete',
+          from: COMPONENTS.OFFSCREEN,
+          to: COMPONENTS.SIDEBAR,
+          url
+        });
 
     } catch (error) {
         if (error.name === 'AbortError' || (signal && signal.aborted)) {
-            chrome.runtime.sendMessage({ type: 'ama-terminated', url });
+            port.postMessage({
+              type: 'ama-terminated',
+              from: COMPONENTS.OFFSCREEN,
+              to: COMPONENTS.SIDEBAR,
+              url
+            });
         } else {
             console.error('[pdfAMA Engine Room]: AI Query Error:', error);
-            chrome.runtime.sendMessage({ type: 'error', message: `AI Error: ${error.message}`, url });
+            port.postMessage({
+              type: 'error',
+              from: COMPONENTS.OFFSCREEN,
+              to: COMPONENTS.SIDEBAR,
+              url,
+              data: { message: `AI Error: ${error.message}` }
+            });
         }
     } finally {
         abortController = null;

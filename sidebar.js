@@ -1,3 +1,12 @@
+// Establish connection to background
+const port = chrome.runtime.connect({ name: 'sidebar' });
+
+const COMPONENTS = {
+  SIDEBAR: 'sidebar',
+  BACKGROUND: 'background',
+  OFFSCREEN: 'offscreen'
+};
+
 document.addEventListener('DOMContentLoaded', () => {
   // --- DOM ELEMENTS ---
   const chatMessages = document.getElementById('chat-messages');
@@ -58,44 +67,64 @@ document.addEventListener('DOMContentLoaded', () => {
       addMessage(question, 'user');
       setUIState('thinking', 'Thinking...');
       isThinking = true;
-      chrome.runtime.sendMessage({ type: 'ask-question', url: currentUrl, question: question });
+      port.postMessage({
+        type: 'ask-question',
+        from: COMPONENTS.SIDEBAR,
+        to: COMPONENTS.OFFSCREEN,
+        url: currentUrl,
+        data: { question: question, url: currentUrl }
+      });
       chatInput.value = '';
       chatSend.disabled = true;
     }
   };
 
   // --- Message Listener ---
-  chrome.runtime.onMessage.addListener((message) => {
+  port.onMessage.addListener((message) => {
+    console.log("Sidebar received message:", message);
+
     // Initial activation messages from background script
     if (message.type === 'pdf-activated') {
-        if (currentUrl !== message.url) {
-            currentUrl = message.url;
+        const url = message.data.url;
+        console.log("Sidebar processing pdf-activated for url:", url, "currentUrl:", currentUrl);
+        if (currentUrl !== url) {
+            currentUrl = url;
             chatMessages.innerHTML = '';
             setUIState('loading', 'Checking for existing session...');
-            chrome.runtime.sendMessage({ type: 'start-processing', url: currentUrl });
+            console.log("Sidebar sending start-processing message");
+            port.postMessage({
+              type: 'start-processing',
+              from: COMPONENTS.SIDEBAR,
+              to: COMPONENTS.OFFSCREEN,
+              url: currentUrl,
+              data: { url: currentUrl }
+            });
         }
         return;
     }
     if (message.type === 'not-pdf') {
+        console.log("Sidebar setting non-pdf state");
         currentUrl = null;
         setUIState('not-pdf');
         return;
     }
 
-    // All other messages must match the current URL to be processed.
+    // All other messages must match the current URL to be processed
     if (message.url !== currentUrl) {
+        console.log("Sidebar ignoring message for wrong URL:", message);
         return;
     }
 
+    console.log("Sidebar processing", message.type, "message");
     let lastMessageElement;
     switch (message.type) {
       case 'status-update':
-        setUIState('loading', message.message);
+        setUIState('loading', message.data.message);
         break;
 
       case 'init-chat':
         chatMessages.innerHTML = '';
-        message.history.forEach(msg => addMessage(marked.parse(msg.content), msg.role));
+        message.data.history.forEach(msg => addMessage(marked.parse(msg.content), msg.role));
         setUIState('ready', 'Ready to chat.');
         break;
 
@@ -106,14 +135,11 @@ document.addEventListener('DOMContentLoaded', () => {
           lastMessageElement.querySelector('.bubble')._markdownContent = '';
         }
         const bubble = lastMessageElement.querySelector('.bubble');
-        bubble._markdownContent += message.chunk;
-        // Only update innerHTML with parsed markdown on completion to prevent duplication
-        // For now, just append the raw chunk to avoid re-parsing issues.
-        // The full parsing will happen on ama-complete.
-        bubble.textContent += message.chunk; // Append raw text
+        bubble._markdownContent += message.data.chunk;
+        bubble.innerHTML = marked.parse(bubble._markdownContent); // Parse and render accumulated content
         chatMessages.scrollTop = chatMessages.scrollHeight;
         break;
-      
+
       case 'ama-complete':
         const finalBubble = chatMessages.lastElementChild.querySelector('.bubble');
         finalBubble.innerHTML = marked.parse(finalBubble._markdownContent); // Parse full content once
@@ -127,7 +153,7 @@ document.addEventListener('DOMContentLoaded', () => {
         break;
 
       case 'error':
-        addMessage(`Error: ${message.message}`, 'assistant');
+        addMessage(`Error: ${message.data.message}`, 'assistant');
         setUIState('ready', 'You can try asking another question.');
         isThinking = false;
         break;
@@ -150,11 +176,21 @@ document.addEventListener('DOMContentLoaded', () => {
 
   chatStop.addEventListener('click', () => {
     if (isThinking) {
-      chrome.runtime.sendMessage({ type: 'terminate-chat', url: currentUrl });
+      port.postMessage({
+        type: 'terminate-chat',
+        from: COMPONENTS.SIDEBAR,
+        to: COMPONENTS.OFFSCREEN,
+        url: currentUrl,
+        data: { url: currentUrl }
+      });
     }
   });
 
   // --- Initialization ---
   setUIState('loading', 'Initializing...');
-  chrome.runtime.sendMessage({ type: 'sidebar-loaded' });
+  port.postMessage({
+    type: 'sidebar-loaded',
+    from: COMPONENTS.SIDEBAR,
+    to: COMPONENTS.BACKGROUND
+  });
 });
