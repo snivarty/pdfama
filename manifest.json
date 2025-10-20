@@ -9,7 +9,8 @@
     "contextMenus",
     "tabs",
     "offscreen",
-    "unlimitedStorage"
+    "unlimitedStorage",
+    "storage"
   ],
   "host_permissions": [
     "<all_urls>"

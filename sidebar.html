@@ -12,17 +12,20 @@
     </div>
     <div id="chat-container">
       <div id="chat-messages"></div>
-        <div id="chat-input-container">
-          <textarea id="chat-input" placeholder="Ask me anything" rows="3"></textarea>
-          <div id="chat-buttons">
-            <button id="chat-send" disabled>
-              <span class="material-icons">send</span>
-            </button>
-            <button id="chat-stop" style="display:none;">
-              <span class="material-icons">stop</span>
-            </button>
-          </div>
+      <div id="chat-input-container">
+        <textarea id="chat-input" placeholder="Ask me anything" rows="3"></textarea>
+        <div id="chat-buttons">
+          <button id="chat-send" disabled>
+            <span class="material-icons">send</span>
+          </button>
+          <button id="chat-stop" style="display:none;">
+            <span class="material-icons">stop</span>
+          </button>
         </div>
+      </div>
+    </div>
+    <div id="non-pdf-message" style="display: none; text-align: center; padding: 20px; flex-grow: 1; justify-content: center; align-items: center; display: flex;">
+      <p>Please open a pdf file to ask questions on</p>
     </div>
   </div>
   <script src="lib/marked/marked.min.js"></script>

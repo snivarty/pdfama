@@ -2,43 +2,20 @@
 
 import { VectorDB } from '/lib/vectoridb/index.js';
 import { pipeline, env } from '/lib/transformers/transformers.min.js';
+import { getSession, saveSession, VECTORS_STORE } from '/lib/sessiondb/index.js';
 
 // --- CONFIGURATION ---
 const CHUNK_SIZE = 1024;
 const CHUNK_OVERLAP = 100;
-const TOKEN_LIMIT = 32000; // A conservative token limit for Gemini Nano
+const TOKEN_LIMIT = 32000;
 const EMBEDDING_MODEL = 'Xenova/all-MiniLM-L6-v2';
-
-// VectorDB specific configuration
-const DB_PREFIX = 'pdfAMA_'; // Prefix for all PDF databases
-const OBJECT_STORE_NAME = 'pdfVectors';
-const VECTOR_PROPERTY_NAME = 'embedding'; // The property name within the stored object that holds the vector
+const VECTOR_PROPERTY_NAME = 'embedding';
 
 // --- STATE ---
-let chatSession;
 let abortController = null;
-let ragPipeline = null; // Will hold the RAG pipeline for large documents
 
 // --- ENVIRONMENT SETUP ---
-// Skip local model checks for a streamlined setup.
 env.allowLocalModels = false;
-
-// --- UTILITY FUNCTIONS ---
-/**
- * Generates a simple, stable hash from a string.
- * Used to create unique database names from PDF URLs.
- * @param {string} str The input string (e.g., PDF URL).
- * @returns {string} A hash string.
- */
-function hashString(str) {
-    let hash = 0;
-    for (let i = 0; i < str.length; i++) {
-        const char = str.charCodeAt(i);
-        hash = ((hash << 5) - hash) + char;
-        hash |= 0; // Convert to 32bit integer
-    }
-    return Math.abs(hash).toString(36); // Convert to base36 string
-}
 
 // --- CUSTOM TEXT SPLITTER ---
 class RecursiveCharacterTextSplitter {
@@ -130,65 +107,51 @@ class RecursiveCharacterTextSplitter {
     }
 }
 
-// --- CLASSES ---
-/**
- * Manages the entire RAG (Retrieval-Augmented Generation) pipeline.
- */
+
+// --- RAG PIPELINE ---
 class RagPipeline {
-    constructor(text, existingVectorStore = null) {
+    constructor(url, text, vectorStore) {
+        this.url = url;
         this.text = text;
-        this.vectorStore = existingVectorStore; // Can be pre-initialized
+        this.vectorStore = vectorStore;
         this.embedder = null;
     }
 
-    /**
-     * Initializes the pipeline by creating embeddings and the vector store.
-     */
     async init() {
-        chrome.runtime.sendMessage({ type: 'status-update', message: 'Initializing AI model...' });
+        chrome.runtime.sendMessage({ type: 'status-update', message: 'Initializing AI model...', url: this.url });
         this.embedder = await pipeline('feature-extraction', EMBEDDING_MODEL);
 
-        if (!this.vectorStore) { // Only create if not provided
-            chrome.runtime.sendMessage({ type: 'status-update', message: 'Creating vector store...' });
-            this.vectorStore = new VectorDB({
-                dbName: DB_PREFIX + hashString(this.text), // Use a hash of the text for the DB name
-                objectStore: OBJECT_STORE_NAME,
-                vectorPath: VECTOR_PROPERTY_NAME,
-                vectorDimensions: 384 // Dimensions for all-MiniLM-L6-v2
-            });
+        const count = await this.vectorStore.count();
+        if (count > 0) {
+            chrome.runtime.sendMessage({ type: 'status-update', message: 'Re-using existing embeddings.', url: this.url });
+            return;
+        }
 
-            chrome.runtime.sendMessage({ type: 'status-update', message: 'Chunking document...' });
-            const splitter = new RecursiveCharacterTextSplitter({
-                chunkSize: CHUNK_SIZE,
-                chunkOverlap: CHUNK_OVERLAP,
-            });
-            const chunks = await splitter.splitText(this.text);
+        chrome.runtime.sendMessage({ type: 'status-update', message: 'Chunking document...', url: this.url });
+        const splitter = new RecursiveCharacterTextSplitter({
+            chunkSize: CHUNK_SIZE,
+            chunkOverlap: CHUNK_OVERLAP,
+        });
+        const chunks = await splitter.splitText(this.text);
 
-            chrome.runtime.sendMessage({ type: 'status-update', message: 'Generating embeddings (this may take a while)...' });
-            let processedChunks = 0;
-            for (const chunk of chunks) {
-                const embedding = await this.embedder(chunk, { pooling: 'mean', normalize: true });
-                await this.vectorStore.insert({
-                    text: chunk,
-                    [VECTOR_PROPERTY_NAME]: Array.from(embedding.data)
-                });
-                processedChunks++;
-                if (processedChunks % 10 === 0) {
-                     chrome.runtime.sendMessage({ type: 'status-update', message: `Embedding... (${processedChunks}/${chunks.length})` });
-                }
+        chrome.runtime.sendMessage({ type: 'status-update', message: 'Generating embeddings (this may take a while)...', url: this.url });
+        let processedChunks = 0;
+        for (const chunk of chunks) {
+            const embedding = await this.embedder(chunk, { pooling: 'mean', normalize: true });
+            await this.vectorStore.insert({
+                pdfUrl: this.url,
+                text: chunk,
+                [VECTOR_PROPERTY_NAME]: Array.from(embedding.data)
+            });
+            processedChunks++;
+            if (processedChunks % 10 === 0) {
+                chrome.runtime.sendMessage({ type: 'status-update', message: `Embedding... (${processedChunks}/${chunks.length})`, url: this.url });
             }
-        } else {
-            chrome.runtime.sendMessage({ type: 'status-update', message: 'Re-using existing embeddings.' });
         }
     }
 
-    /**
-     * Retrieves relevant context from the vector store based on a query.
-     * @param {string} query - The user's question.
-     * @returns {Promise<string>} The retrieved context.
-     */
     async retrieve(query) {
-        if (!this.embedder) { // Ensure embedder is initialized for retrieval
+        if (!this.embedder) {
             this.embedder = await pipeline('feature-extraction', EMBEDDING_MODEL);
         }
         const queryEmbedding = await this.embedder(query, { pooling: 'mean', normalize: true });
@@ -197,151 +160,130 @@ class RagPipeline {
     }
 }
 
-
-// Listen for commands from the Butler (background.js)
+// --- MESSAGE HANDLING ---
 chrome.runtime.onMessage.addListener(async (message) => {
-  if (message.type === 'start-processing') {
-    await processPdfAndInitAi(message.url);
-  } else if (message.type === 'ask-question') {
-    console.log("[pdfAMA Engine Room]: Received question:", message.question);
-    await handleAskQuestion(message.question);
-  } else if (message.type === 'terminate-chat') {      // NEW
-    console.log("[pdfAMA Engine Room]: Termination requested.");
-    if (abortController) {
-      abortController.abort();
-      abortController = null;
+    if (message.type === 'start-processing') {
+        await processPdfAndInitAi(message.url);
+    } else if (message.type === 'ask-question') {
+        await handleAskQuestion(message.url, message.question);
+    } else if (message.type === 'terminate-chat') {
+        if (abortController) {
+            abortController.abort();
+            abortController = null;
+        }
     }
-  }
 });
 
 async function processPdfAndInitAi(url) {
-  try {
-    chrome.runtime.sendMessage({ type: 'status-update', message: 'Processing PDF...' });
-    
-    // Step 1: Fetch and Parse the PDF
-    const { getDocument, GlobalWorkerOptions } = await import(chrome.runtime.getURL('lib/pdfjs/build/pdf.mjs'));
-    
-    // Use a dedicated worker loader script to handle PDF.js worker imports
-    GlobalWorkerOptions.workerSrc = chrome.runtime.getURL('lib/pdfjs/build/pdfjs-worker-loader.js');
-
-    const response = await fetch(url);
-    if (!response.ok) throw new Error(`Fetch failed: ${response.statusText}`);
-    const pdfData = await response.arrayBuffer();
-    if (pdfData.byteLength === 0) throw new Error("Fetched PDF is empty. Ensure 'Allow access to file URLs' is enabled for the extension.");
-    
-    const typedArray = new Uint8Array(pdfData);
-    const pdf = await getDocument({ data: typedArray }).promise;
-    let textContent = '';
-    for (let i = 1; i <= pdf.numPages; i++) {
-        textContent += (await (await pdf.getPage(i)).getTextContent()).items.map(item => item.str).join(' ');
-    }
-
-    // Step 2: Initialize the AI based on document size
-    if (!self.LanguageModel) throw new Error("LanguageModel API not available.");
-    const availability = await self.LanguageModel.availability({expectedOutputs: [{ type: "text", languages: ["en"] }]});
-    if (availability !== 'available') throw new Error(`AI model not available: ${availability}`);
-
-    if (textContent.length > TOKEN_LIMIT) {
-        // --- RAG PATH for Large Documents ---
-        const dbName = DB_PREFIX + hashString(url); // Use URL hash for DB name
-        let existingVectorStore = null;
-
-        try {
-            // Attempt to open existing DB
-            const tempStore = new VectorDB({
-                dbName: dbName,
-                objectStore: OBJECT_STORE_NAME,
-                vectorPath: VECTOR_PROPERTY_NAME,
-                vectorDimensions: 384 // Must match the dimensions used during creation
-            });
-            // Check if the object store exists and has data
-            const db = await tempStore._db; // Access the internal promise for the DB
-            const transaction = db.transaction([OBJECT_STORE_NAME], "readonly");
-            const store = transaction.objectStore(OBJECT_STORE_NAME);
-            const count = await new Promise((resolve, reject) => {
-                const req = store.count();
-                req.onsuccess = () => resolve(req.result);
-                req.onerror = () => reject(req.error);
-            });
-
-            if (count > 0) {
-                existingVectorStore = tempStore;
-                console.log(`[pdfAMA Engine Room]: Re-using existing VectorDB for ${url}`);
-            } else {
-                console.log(`[pdfAMA Engine Room]: No existing embeddings found for ${url}. Creating new.`);
-            }
-        } catch (e) {
-            console.warn(`[pdfAMA Engine Room]: Could not open existing VectorDB for ${url}: ${e.message}. Creating new.`);
+    try {
+        let session = await getSession(url);
+        if (session && session.text) {
+            // No backward compatibility needed, assume 'assistant' role is correct
+            // for existing sessions.
+            chrome.runtime.sendMessage({ type: 'status-update', message: 'Session found. Loading chat...', url });
+            chrome.runtime.sendMessage({ type: 'init-chat', history: session.chatHistory, url });
+            return;
         }
 
-        ragPipeline = new RagPipeline(textContent, existingVectorStore);
-        await ragPipeline.init();
-    } else {
-        // --- Direct Path for Small Documents ---
-        ragPipeline = null; // Ensure RAG is not used
-        chatSession = await self.LanguageModel.create({
-            initialPrompts: [
-                { role: 'system', content: 'You are a helpful assistant. Answer based *only* on the provided text.' },
-                { role: 'user', content: textContent }
-            ],
-            expectedInputs: [{ type: "text", languages: ["en"] }],
-            expectedOutputs: [{ type: "text", languages: ["en"] }]
-        });
-    }
-    
-    chrome.runtime.sendMessage({ type: 'status-update', message: 'Ready to chat.' });
-    chrome.runtime.sendMessage({ type: 'init-chat', history: [] });
+        chrome.runtime.sendMessage({ type: 'status-update', message: 'Processing PDF...', url });
+        const { getDocument, GlobalWorkerOptions } = await import(chrome.runtime.getURL('lib/pdfjs/build/pdf.mjs'));
+        GlobalWorkerOptions.workerSrc = chrome.runtime.getURL('lib/pdfjs/build/pdfjs-worker-loader.js');
 
-  } catch (error) {
-    console.error('[pdfAMA Engine Room]: CRITICAL ERROR:', error);
-    chrome.runtime.sendMessage({ type: 'error', message: error.message });
-  }
+        const response = await fetch(url);
+        if (!response.ok) throw new Error(`Fetch failed: ${response.statusText}`);
+        const pdfData = await response.arrayBuffer();
+        if (pdfData.byteLength === 0) throw new Error("Fetched PDF is empty.");
+
+        const typedArray = new Uint8Array(pdfData);
+        const pdf = await getDocument({ data: typedArray }).promise;
+        let textContent = '';
+        for (let i = 1; i <= pdf.numPages; i++) {
+            textContent += (await (await pdf.getPage(i)).getTextContent()).items.map(item => item.str).join(' ');
+        }
+
+        session = { url, text: textContent, chatHistory: [] };
+        await saveSession(session);
+
+        chrome.runtime.sendMessage({ type: 'status-update', message: 'Ready to chat.', url });
+        chrome.runtime.sendMessage({ type: 'init-chat', history: [], url });
+
+    } catch (error) {
+        console.error('[pdfAMA Engine Room]: CRITICAL ERROR:', error);
+        chrome.runtime.sendMessage({ type: 'error', message: error.message, url });
+    }
 }
 
-async function handleAskQuestion(question) {
-    console.log("[pdfAMA Engine Room]: Received question:", question);
+async function handleAskQuestion(url, question) {
     abortController = new AbortController();
     const { signal } = abortController;
 
     try {
+        const session = await getSession(url);
+        if (!session) throw new Error('Session not found.');
+
+        session.chatHistory.push({ role: 'user', content: question });
+
+        if (!self.LanguageModel) throw new Error("LanguageModel API not available.");
+        const availability = await self.LanguageModel.availability({expectedOutputs: [{ type: "text", languages: ["en"] }]});
+        if (availability !== 'available') throw new Error(`AI model not available: ${availability}`);
+
         let stream;
-        if (ragPipeline) {
-            // --- RAG Query ---
-            chrome.runtime.sendMessage({ type: 'status-update', message: 'Searching document...' });
-            const context = await ragPipeline.retrieve(question);
+        if (session.text.length > TOKEN_LIMIT) {
+            // --- RAG PATH ---
+            chrome.runtime.sendMessage({ type: 'status-update', message: 'Searching document...', url });
+            const vectorStore = new VectorDB({
+                dbName: 'pdfAMA',
+                objectStore: VECTORS_STORE,
+                vectorPath: VECTOR_PROPERTY_NAME,
+                vectorDimensions: 384
+            });
+            const rag = new RagPipeline(url, session.text, vectorStore);
+            await rag.init();
+            const context = await rag.retrieve(question);
             const augmentedPrompt = `Based on the following text, answer the question: "${question}"\n\n---\n\n${context}`;
             
-            // For RAG, we create a new session for each query
             const ragSession = await self.LanguageModel.create({
-                 initialPrompts: [{ role: 'system', content: 'You are a helpful assistant. Answer based *only* on the provided text.' }],
+                 initialPrompts: [{ role: 'user', content: `You are a helpful assistant. Answer based *only* on the provided text. Here is the text: ${context}\n\nMy question is: ${question}` }],
                  expectedInputs: [{ type: "text", languages: ["en"] }],
                  expectedOutputs: [{ type: "text", languages: ["en"] }]
             });
             stream = await ragSession.promptStreaming(augmentedPrompt, { signal });
 
-        } else if (chatSession) {
-            // --- Direct Query ---
-            stream = await chatSession.promptStreaming(question, { signal });
         } else {
-            throw new Error('AI session not ready.');
+            // --- DIRECT PATH ---
+            const initialUserPrompt = `You are a helpful assistant. Answer based *only* on the provided text. Here is the text: ${session.text}\n\nMy question is: ${question}`;
+            const prompts = [
+                { role: 'user', content: initialUserPrompt },
+                ...session.chatHistory.slice(0, -1).map(msg => ({
+                    ...msg,
+                    role: msg.role === 'model' ? 'assistant' : msg.role // Ensure all previous 'model' roles are 'assistant'
+                }))
+            ];
+            const chatSession = await self.LanguageModel.create({
+                initialPrompts: prompts,
+                expectedInputs: [{ type: "text", languages: ["en"] }],
+                expectedOutputs: [{ type: "text", languages: ["en"] }]
+            });
+            stream = await chatSession.promptStreaming(question, { signal });
         }
 
+        let fullResponse = '';
         for await (const chunk of stream) {
-            if (signal.aborted) {
-                console.log("[pdfAMA Engine Room]: Streaming aborted.");
-                return;
-            }
-            chrome.runtime.sendMessage({ type: 'ama-chunk', chunk: chunk });
+            if (signal.aborted) return;
+            chrome.runtime.sendMessage({ type: 'ama-chunk', chunk, url });
+            fullResponse += chunk;
         }
-        chrome.runtime.sendMessage({ type: 'ama-complete' });
+
+        session.chatHistory.push({ role: 'assistant', content: fullResponse });
+        await saveSession(session);
+        chrome.runtime.sendMessage({ type: 'ama-complete', url });
 
     } catch (error) {
         if (error.name === 'AbortError' || (signal && signal.aborted)) {
-            console.log("[pdfAMA Engine Room]: Chat was aborted by user.");
-            chrome.runtime.sendMessage({ type: 'ama-terminated' });
+            chrome.runtime.sendMessage({ type: 'ama-terminated', url });
         } else {
             console.error('[pdfAMA Engine Room]: AI Query Error:', error);
-            chrome.runtime.sendMessage({ type: 'error', message: `AI Error: ${error.message}` });
+            chrome.runtime.sendMessage({ type: 'error', message: `AI Error: ${error.message}`, url });
         }
     } finally {
         abortController = null;
