@@ -229,17 +229,21 @@ async function processPdfAndInitAi(url) {
               from: COMPONENTS.OFFSCREEN,
               to: COMPONENTS.SIDEBAR,
               url,
-              data: { history: session.chatHistory }
+              data: { history: session.chatHistory, uiState: session.uiState }
             });
             return;
         }
+
+        // Initial state for a new session
+        session = { url, text: '', chatHistory: [], isRAG: false, uiState: 'Processing PDF...' };
+        await saveSession(session);
 
         port.postMessage({
           type: 'status-update',
           from: COMPONENTS.OFFSCREEN,
           to: COMPONENTS.SIDEBAR,
           url,
-          data: { message: 'Processing PDF...' }
+          data: { message: session.uiState }
         });
         const { getDocument, GlobalWorkerOptions } = await import(chrome.runtime.getURL('lib/pdfjs/build/pdf.mjs'));
         GlobalWorkerOptions.workerSrc = chrome.runtime.getURL('lib/pdfjs/build/pdfjs-worker-loader.js');
@@ -256,8 +260,33 @@ async function processPdfAndInitAi(url) {
             textContent += (await (await pdf.getPage(i)).getTextContent()).items.map(item => item.str).join(' ');
         }
 
-        session = { url, text: textContent, chatHistory: [] };
+        const isRAG = textContent.length > TOKEN_LIMIT;
+        session.text = textContent;
+        session.isRAG = isRAG;
+        session.uiState = 'Ready to chat.'; // Default after processing
         await saveSession(session);
+
+        if (isRAG) {
+            session.uiState = 'Initializing RAG pipeline...';
+            await saveSession(session);
+            port.postMessage({
+              type: 'status-update',
+              from: COMPONENTS.OFFSCREEN,
+              to: COMPONENTS.SIDEBAR,
+              url,
+              data: { message: session.uiState }
+            });
+            const vectorStore = new VectorDB({
+                dbName: 'pdfAMA',
+                objectStore: VECTORS_STORE,
+                vectorPath: VECTOR_PROPERTY_NAME,
+                vectorDimensions: 384
+            });
+            const rag = new RagPipeline(url, session.text, vectorStore);
+            await rag.init(); // Trigger chunking and embedding here
+            session.uiState = 'Ready to chat.'; // After RAG init, it's ready
+            await saveSession(session);
+        }
 
         port.postMessage({
           type: 'status-update',
@@ -308,7 +337,7 @@ async function handleAskQuestion(url, question) {
               from: COMPONENTS.OFFSCREEN,
               to: COMPONENTS.SIDEBAR,
               url,
-              data: { message: 'Searching document...' }
+              data: { message: 'Thinking...' }
             });
             const vectorStore = new VectorDB({
                 dbName: 'pdfAMA',

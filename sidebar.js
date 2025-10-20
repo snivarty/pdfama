@@ -119,13 +119,18 @@ document.addEventListener('DOMContentLoaded', () => {
     let lastMessageElement;
     switch (message.type) {
       case 'status-update':
-        setUIState('loading', message.data.message);
+        if (message.data.message === 'Thinking...') {
+          setUIState('thinking', message.data.message);
+        } else {
+          setUIState('loading', message.data.message);
+        }
         break;
 
       case 'init-chat':
         chatMessages.innerHTML = '';
         message.data.history.forEach(msg => addMessage(marked.parse(msg.content), msg.role));
-        setUIState('ready', 'Ready to chat.');
+        // Restore UI state from session, or default to 'ready' if not present
+        setUIState('ready', message.data.uiState || 'Ready to chat.');
         break;
 
       case 'ama-chunk':
@@ -143,7 +148,7 @@ document.addEventListener('DOMContentLoaded', () => {
       case 'ama-complete':
         const finalBubble = chatMessages.lastElementChild.querySelector('.bubble');
         finalBubble.innerHTML = marked.parse(finalBubble._markdownContent); // Parse full content once
-        setUIState('ready');
+        setUIState('ready', 'Ready to chat.'); // Restore the "Ready to chat." message
         isThinking = false;
         break;
 
@@ -187,7 +192,7 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   // --- Initialization ---
-  setUIState('loading', 'Initializing...');
+  setUIState('loading', 'Initializing Context...');
   port.postMessage({
     type: 'sidebar-loaded',
     from: COMPONENTS.SIDEBAR,
