@@ -1,5 +1,28 @@
-// Establish connection to background
-const port = chrome.runtime.connect({ name: 'sidebar' });
+// sidebar.js
+
+let port;
+let messageHandler;
+
+function connect() {
+    port = chrome.runtime.connect({ name: 'sidebar' });
+
+    port.onDisconnect.addListener(() => {
+        console.log("Sidebar port disconnected.");
+        port = null; // Set port to null on disconnection
+    });
+
+    if (messageHandler) {
+        port.onMessage.addListener(messageHandler);
+    }
+}
+
+function safePostMessage(message) {
+    if (!port) {
+        console.log("Port is disconnected, reconnecting...");
+        connect();
+    }
+    port.postMessage(message);
+}
 
 const COMPONENTS = {
   SIDEBAR: 'sidebar',
@@ -34,6 +57,7 @@ document.addEventListener('DOMContentLoaded', () => {
   };
 
   const setUIState = (state, message = '') => {
+    console.log(`Setting UI state to: ${state}`, message);
     statusMessage.textContent = message;
     if (state === 'loading') {
       chatInput.disabled = true;
@@ -67,7 +91,7 @@ document.addEventListener('DOMContentLoaded', () => {
       addMessage(question, 'user');
       setUIState('thinking', 'Thinking...');
       isThinking = true;
-      port.postMessage({
+      safePostMessage({
         type: 'ask-question',
         from: COMPONENTS.SIDEBAR,
         to: COMPONENTS.OFFSCREEN,
@@ -80,9 +104,7 @@ document.addEventListener('DOMContentLoaded', () => {
   };
 
   // --- Message Listener ---
-  port.onMessage.addListener((message) => {
-    console.log("Sidebar received message:", message);
-
+  messageHandler = (message) => {
     // Initial activation messages from background script
     if (message.type === 'pdf-activated') {
         const url = message.data.url;
@@ -92,7 +114,7 @@ document.addEventListener('DOMContentLoaded', () => {
             chatMessages.innerHTML = '';
             setUIState('loading', 'Checking for existing session...');
             console.log("Sidebar sending start-processing message");
-            port.postMessage({
+            safePostMessage({
               type: 'start-processing',
               from: COMPONENTS.SIDEBAR,
               to: COMPONENTS.OFFSCREEN,
@@ -124,14 +146,14 @@ document.addEventListener('DOMContentLoaded', () => {
         console.log("Sidebar received tab-activated for url:", message.url);
         if (message.url === currentUrl) {
             // Request offscreen to send buffered response if any
-            port.postMessage({
+            safePostMessage({
                 type: 'request-buffered-response', // New message type for offscreen
                 from: COMPONENTS.SIDEBAR,
                 to: COMPONENTS.OFFSCREEN,
                 url: currentUrl
             });
             // Re-evaluate UI state based on current session (which offscreen will send via init-chat or status-update)
-            port.postMessage({
+            safePostMessage({
               type: 'start-processing', // Re-trigger processing to get latest state
               from: COMPONENTS.SIDEBAR,
               to: COMPONENTS.OFFSCREEN,
@@ -204,7 +226,11 @@ document.addEventListener('DOMContentLoaded', () => {
         isThinking = false;
         break;
     }
-  });
+  };
+
+  if (port) {
+    port.onMessage.addListener(messageHandler);
+  }
 
   // --- Input & Button Events ---
   chatSend.addEventListener('click', handleUserMessage);
@@ -222,7 +248,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   chatStop.addEventListener('click', () => {
     if (isThinking) {
-      port.postMessage({
+      safePostMessage({
         type: 'terminate-chat',
         from: COMPONENTS.SIDEBAR,
         to: COMPONENTS.OFFSCREEN,
@@ -234,9 +260,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // --- Initialization ---
   setUIState('loading', 'Initializing Context...');
-  port.postMessage({
+  safePostMessage({
     type: 'sidebar-loaded',
     from: COMPONENTS.SIDEBAR,
     to: COMPONENTS.BACKGROUND
   });
 });
+
+connect(); // Initial connection

@@ -22,8 +22,7 @@
     "service_worker": "background.js"
   },
   "content_security_policy": {
-    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self';",
-    "worker_src": "'self' blob: http://localhost:* https://localhost:* http://127.0.0.1:*;"
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; script-src-elem 'self' blob:;"
   },
   "content_scripts": [
     {

@@ -192,7 +192,6 @@ let currentUrl = null;
 
 // --- MESSAGE HANDLING ---
 port.onMessage.addListener(async (message) => {
-    console.log("Offscreen received message:", message);
     // Only process messages addressed to offscreen
     if (message.to !== COMPONENTS.OFFSCREEN) {
       console.log("Offscreen ignoring message not addressed to it:", message);

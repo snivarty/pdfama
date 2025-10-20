@@ -28,8 +28,9 @@ chrome.runtime.onConnect.addListener((port) => {
         if (message.to === COMPONENTS.BACKGROUND) {
           // Handle internal messages from sidebar
           if (message.type === 'sidebar-loaded') {
-            console.log("Background processing sidebar-loaded");
+            console.log("Background processing sidebar-loaded. Calling notifySidebarOfActiveTab.");
             notifySidebarOfActiveTab();
+            console.log("notifySidebarOfActiveTab called after sidebar-loaded.");
           }
         } else {
           routeMessage(message);
@@ -49,7 +50,6 @@ chrome.runtime.onConnect.addListener((port) => {
         offscreenReadyPromise = null; // Reset promise on disconnect
       });
       port.onMessage.addListener((message) => {
-        console.log("Background received message from offscreen:", message);
         routeMessage(message); // Offscreen messages are always routed to sidebar
       });
       break;
@@ -163,9 +163,21 @@ async function notifySidebarOfActiveTab() {
             if (isCurrentTabPdf) {
                 // New active tab is a PDF
                 console.log(`New active tab is PDF: ${currentActiveTab.url}. Activating.`);
-                await setupOffscreenDocument(OFFSCREEN_DOCUMENT_PATH);
+                await setupOffscreenDocument(OFFSCREEN_DOCUMENT_PATH); // Ensure offscreen document is ready
+
+                // Now, explicitly wait for both ports to be established if they aren't already
+                if (!offscreenPort) {
+                    console.log("Waiting for offscreenPort to connect...");
+                    await ensureOffscreenReadyPromise();
+                }
+                if (!sidebarPort) {
+                    console.log("Waiting for sidebarPort to connect (this shouldn't happen if sidebar is loaded)...");
+                    // This case might indicate a deeper issue or a very specific timing window
+                    // For now, we'll proceed, but it's a point of concern.
+                }
 
                 if (offscreenPort && sidebarPort) {
+                    console.log("Both offscreen and sidebar ports are connected. Sending pdf-activated and tab-activated messages.");
                     sidebarPort.postMessage({
                       type: 'pdf-activated',
                       from: COMPONENTS.BACKGROUND,
@@ -180,7 +192,7 @@ async function notifySidebarOfActiveTab() {
                     });
                     activePdfTab = { tabId: currentActiveTab.id, url: currentActiveTab.url };
                 } else {
-                    console.warn("Failed to establish offscreen connection or sidebar port after setup, skipping PDF activation.");
+                    console.warn("Failed to establish offscreen connection or sidebar port after setup, skipping PDF activation. OffscreenPort:", offscreenPort ? "connected" : "not connected", "SidebarPort:", sidebarPort ? "connected" : "not connected");
                     activePdfTab = { tabId: null, url: null }; // Reset if activation fails
                 }
             } else {
@@ -198,7 +210,16 @@ async function notifySidebarOfActiveTab() {
             console.log(`Initial PDF tab activation: ${currentActiveTab.url}.`);
             await setupOffscreenDocument(OFFSCREEN_DOCUMENT_PATH);
 
+            if (!offscreenPort) {
+                console.log("Waiting for offscreenPort to connect during initial activation...");
+                await ensureOffscreenReadyPromise();
+            }
+            if (!sidebarPort) {
+                console.log("Waiting for sidebarPort to connect during initial activation (this shouldn't happen)...");
+            }
+
             if (offscreenPort && sidebarPort) {
+                console.log("Both offscreen and sidebar ports are connected during initial activation. Sending pdf-activated and tab-activated messages.");
                 sidebarPort.postMessage({
                   type: 'pdf-activated',
                   from: COMPONENTS.BACKGROUND,
@@ -213,7 +234,7 @@ async function notifySidebarOfActiveTab() {
                 });
                 activePdfTab = { tabId: currentActiveTab.id, url: currentActiveTab.url };
             } else {
-                console.warn("Failed to establish offscreen connection or sidebar port during initial PDF activation.");
+                console.warn("Failed to establish offscreen connection or sidebar port during initial PDF activation. OffscreenPort:", offscreenPort ? "connected" : "not connected", "SidebarPort:", sidebarPort ? "connected" : "not connected");
                 activePdfTab = { tabId: null, url: null };
             }
         }
