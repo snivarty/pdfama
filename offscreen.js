@@ -20,6 +20,9 @@ const VECTOR_PROPERTY_NAME = 'embedding';
 
 // --- STATE ---
 let abortController = null;
+let isSidebarActive = true; // Assume active initially
+let bufferedResponse = '';
+let bufferedUiState = '';
 
 // --- ENVIRONMENT SETUP ---
 env.allowLocalModels = false;
@@ -184,6 +187,9 @@ class RagPipeline {
     }
 }
 
+// Need to track currentUrl in offscreen.js for tab activation/deactivation logic
+let currentUrl = null;
+
 // --- MESSAGE HANDLING ---
 port.onMessage.addListener(async (message) => {
     console.log("Offscreen received message:", message);
@@ -208,10 +214,81 @@ port.onMessage.addListener(async (message) => {
                 abortController = null;
             }
             break;
+        case 'tab-activated':
+            console.log("Offscreen received tab-activated for url:", message.url);
+            if (message.url === currentUrl) {
+                isSidebarActive = true;
+                if (bufferedResponse) {
+                    port.postMessage({
+                        type: 'ama-chunk',
+                        from: COMPONENTS.OFFSCREEN,
+                        to: COMPONENTS.SIDEBAR,
+                        url: message.url,
+                        data: { chunk: bufferedResponse }
+                    });
+                    bufferedResponse = '';
+                }
+                if (bufferedUiState) {
+                    port.postMessage({
+                        type: 'status-update',
+                        from: COMPONENTS.OFFSCREEN,
+                        to: COMPONENTS.SIDEBAR,
+                        url: message.url,
+                        data: { message: bufferedUiState }
+                    });
+                    bufferedUiState = '';
+                }
+                port.postMessage({
+                    type: 'ama-complete-buffered', // Use a specific type for buffered completion
+                    from: COMPONENTS.OFFSCREEN,
+                    to: COMPONENTS.SIDEBAR,
+                    url: message.url
+                });
+            }
+            break;
+        case 'tab-deactivated':
+            console.log("Offscreen received tab-deactivated for url:", message.url);
+            if (message.url === currentUrl) {
+                isSidebarActive = false;
+            }
+            break;
+        case 'request-buffered-response':
+            console.log("Offscreen received request-buffered-response for url:", message.url);
+            if (message.url === currentUrl) {
+                if (bufferedResponse) {
+                    port.postMessage({
+                        type: 'ama-chunk',
+                        from: COMPONENTS.OFFSCREEN,
+                        to: COMPONENTS.SIDEBAR,
+                        url: message.url,
+                        data: { chunk: bufferedResponse }
+                    });
+                    bufferedResponse = '';
+                }
+                if (bufferedUiState) {
+                    port.postMessage({
+                        type: 'status-update',
+                        from: COMPONENTS.OFFSCREEN,
+                        to: COMPONENTS.SIDEBAR,
+                        url: message.url,
+                        data: { message: bufferedUiState }
+                    });
+                    bufferedUiState = '';
+                }
+                port.postMessage({
+                    type: 'ama-complete-buffered',
+                    from: COMPONENTS.OFFSCREEN,
+                    to: COMPONENTS.SIDEBAR,
+                    url: message.url
+                });
+            }
+            break;
     }
 });
 
+
 async function processPdfAndInitAi(url) {
+    currentUrl = url; // Set currentUrl when processing starts
     try {
         let session = await getSession(url);
         if (session && session.text) {
@@ -378,25 +455,37 @@ async function handleAskQuestion(url, question) {
         let fullResponse = '';
         for await (const chunk of stream) {
             if (signal.aborted) return;
-            console.log("Offscreen sent chunk for:", url);
-            port.postMessage({
-              type: 'ama-chunk',
-              from: COMPONENTS.OFFSCREEN,
-              to: COMPONENTS.SIDEBAR,
-              url,
-              data: { chunk }
-            });
+            if (isSidebarActive) {
+                port.postMessage({
+                  type: 'ama-chunk',
+                  from: COMPONENTS.OFFSCREEN,
+                  to: COMPONENTS.SIDEBAR,
+                  url,
+                  data: { chunk }
+                });
+            } else {
+                bufferedResponse += chunk;
+            }
             fullResponse += chunk;
         }
 
         session.chatHistory.push({ role: 'assistant', content: fullResponse });
         await saveSession(session);
-        port.postMessage({
-          type: 'ama-complete',
-          from: COMPONENTS.OFFSCREEN,
-          to: COMPONENTS.SIDEBAR,
-          url
-        });
+
+        if (isSidebarActive) {
+            port.postMessage({
+              type: 'ama-complete',
+              from: COMPONENTS.OFFSCREEN,
+              to: COMPONENTS.SIDEBAR,
+              url
+            });
+        } else {
+            // If sidebar is not active, send a special message to indicate completion
+            // and that the response is buffered.
+            bufferedUiState = 'Response ready (buffered).';
+            // No message sent here, it will be sent when tab is activated
+        }
+
 
     } catch (error) {
         if (error.name === 'AbortError' || (signal && signal.aborted)) {

@@ -108,6 +108,39 @@ document.addEventListener('DOMContentLoaded', () => {
         setUIState('not-pdf');
         return;
     }
+    if (message.type === 'tab-deactivated') {
+        console.log("Sidebar received tab-deactivated for url:", message.url);
+        if (message.url === currentUrl) {
+            // Keep chat input disabled, show status that processing is in background
+            setUIState('loading', 'Generating response in background...');
+            // Keep chatStop visible if it was thinking
+            if (isThinking) {
+                chatStop.style.display = 'inline-flex';
+            }
+        }
+        return;
+    }
+    if (message.type === 'tab-activated') {
+        console.log("Sidebar received tab-activated for url:", message.url);
+        if (message.url === currentUrl) {
+            // Request offscreen to send buffered response if any
+            port.postMessage({
+                type: 'request-buffered-response', // New message type for offscreen
+                from: COMPONENTS.SIDEBAR,
+                to: COMPONENTS.OFFSCREEN,
+                url: currentUrl
+            });
+            // Re-evaluate UI state based on current session (which offscreen will send via init-chat or status-update)
+            port.postMessage({
+              type: 'start-processing', // Re-trigger processing to get latest state
+              from: COMPONENTS.SIDEBAR,
+              to: COMPONENTS.OFFSCREEN,
+              url: currentUrl,
+              data: { url: currentUrl }
+            });
+        }
+        return;
+    }
 
     // All other messages must match the current URL to be processed
     if (message.url !== currentUrl) {
@@ -149,6 +182,14 @@ document.addEventListener('DOMContentLoaded', () => {
         const finalBubble = chatMessages.lastElementChild.querySelector('.bubble');
         finalBubble.innerHTML = marked.parse(finalBubble._markdownContent); // Parse full content once
         setUIState('ready', 'Ready to chat.'); // Restore the "Ready to chat." message
+        isThinking = false;
+        break;
+
+      case 'ama-complete-buffered':
+        // When a buffered response is completed and the tab is reactivated,
+        // offscreen sends the full response via ama-chunk and then ama-complete-buffered.
+        // The ama-chunk handler already adds the content, so we just need to finalize UI.
+        setUIState('ready', 'Ready to chat.');
         isThinking = false;
         break;
 

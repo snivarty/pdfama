@@ -10,6 +10,7 @@ const COMPONENTS = {
 // Maintain direct connections to components
 let sidebarPort = null;
 let offscreenPort = null;
+let activePdfTab = { tabId: null, url: null }; // Track the currently active PDF tab
 
 chrome.runtime.onConnect.addListener((port) => {
   console.log('Background connected to:', port.name);
@@ -116,8 +117,22 @@ async function setupOffscreenDocument(path) {
 
 async function notifySidebarOfActiveTab() {
     try {
-        const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-        if (!activeTab || !activeTab.url) {
+        const [currentActiveTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+
+        if (!currentActiveTab || !currentActiveTab.url) {
+            // If no active tab or URL, and there was a previous PDF tab, deactivate it
+            if (activePdfTab.url) {
+                console.log(`No active tab or URL. Deactivating previous PDF tab: ${activePdfTab.url}`);
+                if (offscreenPort) {
+                    offscreenPort.postMessage({
+                        type: 'tab-deactivated',
+                        from: COMPONENTS.BACKGROUND,
+                        to: COMPONENTS.OFFSCREEN,
+                        url: activePdfTab.url
+                    });
+                }
+                activePdfTab = { tabId: null, url: null };
+            }
             if (sidebarPort) sidebarPort.postMessage({
               type: 'not-pdf',
               from: COMPONENTS.BACKGROUND,
@@ -125,32 +140,82 @@ async function notifySidebarOfActiveTab() {
             });
             return;
         }
-        const isPdf = activeTab.url.toLowerCase().endsWith('.pdf') ||
-                     (activeTab.mimeType && activeTab.mimeType === 'application/pdf') ||
-                     (activeTab.url.includes('.pdf'));
-        if (isPdf) {
-            // Ensure offscreen document is created and wait for its port to be established
-            console.log("Calling setupOffscreenDocument and awaiting its promise...");
-            await setupOffscreenDocument(OFFSCREEN_DOCUMENT_PATH);
-            console.log("setupOffscreenDocument promise resolved. Checking offscreenPort:", offscreenPort ? "connected" : "not connected");
 
-            if (offscreenPort && sidebarPort) { // Check offscreenPort directly after awaiting setup
-                console.log("Both offscreen and sidebar ports are connected. Sending pdf-activated message.");
+        const isCurrentTabPdf = currentActiveTab.url.toLowerCase().endsWith('.pdf') ||
+                               (currentActiveTab.mimeType && currentActiveTab.mimeType === 'application/pdf') ||
+                               (currentActiveTab.url.includes('.pdf'));
+
+        // Check if the active PDF tab has changed or if a non-PDF tab became active
+        if (activePdfTab.tabId !== currentActiveTab.id || activePdfTab.url !== currentActiveTab.url) {
+            // If there was a previous active PDF tab, send deactivate signal
+            if (activePdfTab.url) {
+                console.log(`Tab changed. Deactivating previous PDF tab: ${activePdfTab.url}`);
+                if (offscreenPort) {
+                    offscreenPort.postMessage({
+                        type: 'tab-deactivated',
+                        from: COMPONENTS.BACKGROUND,
+                        to: COMPONENTS.OFFSCREEN,
+                        url: activePdfTab.url
+                    });
+                }
+            }
+
+            if (isCurrentTabPdf) {
+                // New active tab is a PDF
+                console.log(`New active tab is PDF: ${currentActiveTab.url}. Activating.`);
+                await setupOffscreenDocument(OFFSCREEN_DOCUMENT_PATH);
+
+                if (offscreenPort && sidebarPort) {
+                    sidebarPort.postMessage({
+                      type: 'pdf-activated',
+                      from: COMPONENTS.BACKGROUND,
+                      to: COMPONENTS.SIDEBAR,
+                      data: { url: currentActiveTab.url }
+                    });
+                    offscreenPort.postMessage({
+                        type: 'tab-activated',
+                        from: COMPONENTS.BACKGROUND,
+                        to: COMPONENTS.OFFSCREEN,
+                        url: currentActiveTab.url
+                    });
+                    activePdfTab = { tabId: currentActiveTab.id, url: currentActiveTab.url };
+                } else {
+                    console.warn("Failed to establish offscreen connection or sidebar port after setup, skipping PDF activation.");
+                    activePdfTab = { tabId: null, url: null }; // Reset if activation fails
+                }
+            } else {
+                // New active tab is NOT a PDF
+                console.log(`New active tab is NOT PDF: ${currentActiveTab.url}.`);
+                if (sidebarPort) sidebarPort.postMessage({
+                  type: 'not-pdf',
+                  from: COMPONENTS.BACKGROUND,
+                  to: COMPONENTS.SIDEBAR
+                });
+                activePdfTab = { tabId: null, url: null };
+            }
+        } else if (isCurrentTabPdf && !activePdfTab.url) {
+            // This case handles initial load where activePdfTab might be null but current tab is PDF
+            console.log(`Initial PDF tab activation: ${currentActiveTab.url}.`);
+            await setupOffscreenDocument(OFFSCREEN_DOCUMENT_PATH);
+
+            if (offscreenPort && sidebarPort) {
                 sidebarPort.postMessage({
                   type: 'pdf-activated',
                   from: COMPONENTS.BACKGROUND,
                   to: COMPONENTS.SIDEBAR,
-                  data: { url: activeTab.url }
+                  data: { url: currentActiveTab.url }
                 });
+                offscreenPort.postMessage({
+                    type: 'tab-activated',
+                    from: COMPONENTS.BACKGROUND,
+                    to: COMPONENTS.OFFSCREEN,
+                    url: currentActiveTab.url
+                });
+                activePdfTab = { tabId: currentActiveTab.id, url: currentActiveTab.url };
             } else {
-                console.warn("Failed to establish offscreen connection or sidebar port after setup, skipping PDF activation. OffscreenPort:", offscreenPort, "SidebarPort:", sidebarPort);
+                console.warn("Failed to establish offscreen connection or sidebar port during initial PDF activation.");
+                activePdfTab = { tabId: null, url: null };
             }
-        } else {
-            if (sidebarPort) sidebarPort.postMessage({
-              type: 'not-pdf',
-              from: COMPONENTS.BACKGROUND,
-              to: COMPONENTS.SIDEBAR
-            });
         }
     } catch (e) {
         console.warn("Could not notify sidebar of tab change:", e);
@@ -224,5 +289,20 @@ chrome.tabs.onActivated.addListener(notifySidebarOfActiveTab);
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     if (tab.active && changeInfo.status === 'complete') {
         notifySidebarOfActiveTab();
+    }
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+    if (activePdfTab.tabId === tabId) {
+        console.log(`PDF tab ${tabId} removed. Deactivating.`);
+        if (offscreenPort) {
+            offscreenPort.postMessage({
+                type: 'tab-deactivated',
+                from: COMPONENTS.BACKGROUND,
+                to: COMPONENTS.OFFSCREEN,
+                url: activePdfTab.url
+            });
+        }
+        activePdfTab = { tabId: null, url: null };
     }
 });

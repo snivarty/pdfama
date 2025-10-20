@@ -135,11 +135,11 @@ h1 {
 }
 
 
-.bot-message {
+.assistant-message { /* Changed from .bot-message to .assistant-message */
   justify-content: flex-start;
 }
 
-.bot-message .bubble {
+.assistant-message .bubble { /* Changed from .bot-message to .assistant-message */
   color: #333;
   /* border-top-left-radius: 2px; */
   border : 1px solid transparent;  /* thicker border, gradient shows as thin line */
@@ -147,6 +147,7 @@ h1 {
   background-origin: border-box;
   background-clip: padding-box, border-box;
   padding: 10px;
+  /* Removed diagnostic background-color */
 }
 
 .bubble p {
