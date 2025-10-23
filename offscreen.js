@@ -296,35 +296,22 @@ port.onMessage.addListener(async (message) => {
 async function processPdfAndInitAi(url) {
     currentUrl = url; // Set currentUrl when processing starts
     try {
-        // Always re-process the PDF and initialize RAG for new RAG-able docs.
-        // This ensures the pipeline runs even if a session with text exists,
-        // addressing the "stuck on initiating" issue.
-        let session = await getSession(url);
-        if (!session) {
-            session = { url, text: '', chatHistory: [], isRAG: false, uiState: 'Processing PDF...' };
-        } else {
-            // If a session exists, clear its text and RAG status to force re-processing
-            session.text = '';
-            session.isRAG = false;
-            session.uiState = 'Processing PDF...';
-        }
-
-        await saveSession(session);
-
         port.postMessage({
           type: 'status-update',
           from: COMPONENTS.OFFSCREEN,
           to: COMPONENTS.SIDEBAR,
           url,
-          data: { message: session.uiState }
+          data: { message: 'Processing PDF...' }
         });
+
+        // Step 1: Fetch and Parse the PDF
         const { getDocument, GlobalWorkerOptions } = await import(chrome.runtime.getURL('lib/pdfjs/build/pdf.mjs'));
         GlobalWorkerOptions.workerSrc = chrome.runtime.getURL('lib/pdfjs/build/pdfjs-worker-loader.js');
 
         const response = await fetch(url);
         if (!response.ok) throw new Error(`Fetch failed: ${response.statusText}`);
         const pdfData = await response.arrayBuffer();
-        if (pdfData.byteLength === 0) throw new Error("Fetched PDF is empty.");
+        if (pdfData.byteLength === 0) throw new Error("Fetched PDF is empty. Ensure 'Allow access to file URLs' is enabled for the extension.");
 
         const typedArray = new Uint8Array(pdfData);
         const pdf = await getDocument({ data: typedArray }).promise;
@@ -333,38 +320,55 @@ async function processPdfAndInitAi(url) {
             textContent += (await (await pdf.getPage(i)).getTextContent()).items.map(item => item.str).join(' ');
         }
 
+        let session = await getSession(url);
+        if (!session) {
+            session = { url, text: textContent, chatHistory: [], isRAG: false, uiState: '' };
+        } else {
+            session.text = textContent;
+        }
+
+        // Step 2: Initialize the AI based on document size
+        if (!self.LanguageModel) throw new Error("LanguageModel API not available.");
+        const availability = await self.LanguageModel.availability({expectedOutputs: [{ type: "text", languages: ["en"] }]});
+        if (availability !== 'available') throw new Error(`AI model not available: ${availability}`);
+
         const isRAG = textContent.length > TOKEN_LIMIT;
-        session.text = textContent;
         session.isRAG = isRAG;
-        session.uiState = 'Ready to chat.'; // Default after processing
         await saveSession(session);
 
         if (isRAG) {
-            console.log("Document exceeds token limit, initializing RAG pipeline.");
-            session.uiState = 'Initializing RAG pipeline...';
-            await saveSession(session);
-            console.log("Updating sidebar with RAG initialization status.");
-            port.postMessage({
-              type: 'status-update',
-              from: COMPONENTS.OFFSCREEN,
-              to: COMPONENTS.SIDEBAR,
-              url,
-              data: { message: session.uiState }
-            });
-            console.log("Initializing RAG pipeline for URL:", url);
+            // --- RAG PATH for Large Documents ---
             const storeName = getStoreName(url);
-            const vectorStore = new VectorDB({
+            let vectorStore = new VectorDB({
                 dbName: 'pdfAMA',
                 storeName,
                 vectorPath: VECTOR_PROPERTY_NAME,
                 vectorDimensions: 384
             });
-            const rag = new RagPipeline(url, session.text, vectorStore);
-            console.log("Starting RAG init...");
-            await rag.init(); // Trigger chunking and embedding here
-            console.log("RAG init complete.");
-            session.uiState = 'Ready to chat.'; // After RAG init, it's ready
-            await saveSession(session);
+
+            const db = await vectorStore._db;
+            const transaction = db.transaction([storeName], "readonly");
+            const store = transaction.objectStore(storeName);
+            const count = await new Promise((resolve, reject) => {
+                const req = store.count();
+                req.onsuccess = () => resolve(req.result);
+                req.onerror = () => reject(req.error);
+            });
+
+            if (count > 0) {
+                console.log(`[pdfAMA Engine Room]: Re-using existing VectorDB for ${url}`);
+                port.postMessage({
+                  type: 'status-update',
+                  from: COMPONENTS.OFFSCREEN,
+                  to: COMPONENTS.SIDEBAR,
+                  url,
+                  data: { message: 'Re-using existing embeddings.' }
+                });
+            } else {
+                console.log(`[pdfAMA Engine Room]: No existing embeddings found for ${url}. Creating new.`);
+                const rag = new RagPipeline(url, textContent, vectorStore);
+                await rag.init();
+            }
         }
 
         port.postMessage({
@@ -379,7 +383,7 @@ async function processPdfAndInitAi(url) {
           from: COMPONENTS.OFFSCREEN,
           to: COMPONENTS.SIDEBAR,
           url,
-          data: { history: [] }
+          data: { history: session.chatHistory }
         });
 
     } catch (error) {
