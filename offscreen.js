@@ -118,6 +118,13 @@ class RecursiveCharacterTextSplitter {
 }
 
 
+// --- HELPERS ---
+function getStoreName(url) {
+  // This will create a unique store name based on the URL.
+  // It will strip any special characters from the URL.
+  return `vdb_${url.replace(/[^a-zA-Z0-9]/g, "")}`;
+}
+
 // --- RAG PIPELINE ---
 class RagPipeline {
     constructor(url, text, vectorStore) {
@@ -130,11 +137,6 @@ class RagPipeline {
     async init() {
         this.embedder = await pipeline('feature-extraction', EMBEDDING_MODEL);
 
-        const count = await this.vectorStore.count();
-        if (count > 0) {
-
-            return;
-        }
 
         port.postMessage({
           type: 'status-update',
@@ -156,8 +158,10 @@ class RagPipeline {
           url: this.url,
           data: { message: 'Generating embeddings (this may take a while)...' }
         });
+        console.log('Starting embedding of', chunks.length, 'chunks');
         let processedChunks = 0;
         for (const chunk of chunks) {
+            console.log('Embedding chunk', processedChunks + 1, 'of', chunks.length);
             const embedding = await this.embedder(chunk, { pooling: 'mean', normalize: true });
             await this.vectorStore.insert({
                 pdfUrl: this.url,
@@ -215,6 +219,9 @@ port.onMessage.addListener(async (message) => {
             break;
         case 'tab-activated':
             console.log("Offscreen received tab-activated for url:", message.url);
+            // Initiate PDF processing and RAG pipeline for the activated tab
+            await processPdfAndInitAi(message.url);
+            // After processing, handle buffered responses if sidebar becomes active
             if (message.url === currentUrl) {
                 isSidebarActive = true;
                 if (bufferedResponse) {
@@ -289,29 +296,19 @@ port.onMessage.addListener(async (message) => {
 async function processPdfAndInitAi(url) {
     currentUrl = url; // Set currentUrl when processing starts
     try {
+        // Always re-process the PDF and initialize RAG for new RAG-able docs.
+        // This ensures the pipeline runs even if a session with text exists,
+        // addressing the "stuck on initiating" issue.
         let session = await getSession(url);
-        if (session && session.text) {
-            // No backward compatibility needed, assume 'assistant' role is correct
-            // for existing sessions.
-            port.postMessage({
-              type: 'status-update',
-              from: COMPONENTS.OFFSCREEN,
-              to: COMPONENTS.SIDEBAR,
-              url,
-              data: { message: 'Session found. Loading chat...' }
-            });
-            port.postMessage({
-              type: 'init-chat',
-              from: COMPONENTS.OFFSCREEN,
-              to: COMPONENTS.SIDEBAR,
-              url,
-              data: { history: session.chatHistory, uiState: session.uiState }
-            });
-            return;
+        if (!session) {
+            session = { url, text: '', chatHistory: [], isRAG: false, uiState: 'Processing PDF...' };
+        } else {
+            // If a session exists, clear its text and RAG status to force re-processing
+            session.text = '';
+            session.isRAG = false;
+            session.uiState = 'Processing PDF...';
         }
 
-        // Initial state for a new session
-        session = { url, text: '', chatHistory: [], isRAG: false, uiState: 'Processing PDF...' };
         await saveSession(session);
 
         port.postMessage({
@@ -343,8 +340,10 @@ async function processPdfAndInitAi(url) {
         await saveSession(session);
 
         if (isRAG) {
+            console.log("Document exceeds token limit, initializing RAG pipeline.");
             session.uiState = 'Initializing RAG pipeline...';
             await saveSession(session);
+            console.log("Updating sidebar with RAG initialization status.");
             port.postMessage({
               type: 'status-update',
               from: COMPONENTS.OFFSCREEN,
@@ -352,14 +351,18 @@ async function processPdfAndInitAi(url) {
               url,
               data: { message: session.uiState }
             });
+            console.log("Initializing RAG pipeline for URL:", url);
+            const storeName = getStoreName(url);
             const vectorStore = new VectorDB({
                 dbName: 'pdfAMA',
-                objectStore: VECTORS_STORE,
+                storeName,
                 vectorPath: VECTOR_PROPERTY_NAME,
                 vectorDimensions: 384
             });
             const rag = new RagPipeline(url, session.text, vectorStore);
+            console.log("Starting RAG init...");
             await rag.init(); // Trigger chunking and embedding here
+            console.log("RAG init complete.");
             session.uiState = 'Ready to chat.'; // After RAG init, it's ready
             await saveSession(session);
         }
@@ -415,9 +418,10 @@ async function handleAskQuestion(url, question) {
               url,
               data: { message: 'Thinking...' }
             });
+            const storeName = getStoreName(url);
             const vectorStore = new VectorDB({
                 dbName: 'pdfAMA',
-                objectStore: VECTORS_STORE,
+                storeName,
                 vectorPath: VECTOR_PROPERTY_NAME,
                 vectorDimensions: 384
             });

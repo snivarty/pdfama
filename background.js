@@ -12,6 +12,11 @@ let sidebarPort = null;
 let offscreenPort = null;
 let activePdfTab = { tabId: null, url: null }; // Track the currently active PDF tab
 
+let sidebarReadyResolve = null;
+let sidebarReadyPromise = new Promise(resolve => {
+  sidebarReadyResolve = resolve;
+});
+
 chrome.runtime.onConnect.addListener((port) => {
   console.log('Background connected to:', port.name);
 
@@ -19,9 +24,16 @@ chrome.runtime.onConnect.addListener((port) => {
     case COMPONENTS.SIDEBAR:
       sidebarPort = port;
       console.log('Sidebar connection established');
+      if (sidebarReadyResolve) {
+        sidebarReadyResolve();
+        sidebarReadyResolve = null;
+      }
       port.onDisconnect.addListener(() => {
         console.log('Sidebar disconnected');
         sidebarPort = null;
+        sidebarReadyPromise = new Promise(resolve => {
+          sidebarReadyResolve = resolve;
+        });
       });
       port.onMessage.addListener((message) => {
         console.log("Background received message from sidebar:", message);
@@ -171,9 +183,8 @@ async function notifySidebarOfActiveTab() {
                     await ensureOffscreenReadyPromise();
                 }
                 if (!sidebarPort) {
-                    console.log("Waiting for sidebarPort to connect (this shouldn't happen if sidebar is loaded)...");
-                    // This case might indicate a deeper issue or a very specific timing window
-                    // For now, we'll proceed, but it's a point of concern.
+                    console.log("Waiting for sidebarPort to connect...");
+                    await sidebarReadyPromise;
                 }
 
                 if (offscreenPort && sidebarPort) {
@@ -215,7 +226,8 @@ async function notifySidebarOfActiveTab() {
                 await ensureOffscreenReadyPromise();
             }
             if (!sidebarPort) {
-                console.log("Waiting for sidebarPort to connect during initial activation (this shouldn't happen)...");
+                console.log("Waiting for sidebarPort to connect during initial activation...");
+                await sidebarReadyPromise;
             }
 
             if (offscreenPort && sidebarPort) {
@@ -248,7 +260,6 @@ function routeMessage(message) {
   switch (message.to) {
     case COMPONENTS.SIDEBAR:
       if (sidebarPort) {
-        console.log("Routing message to sidebar");
         sidebarPort.postMessage(message);
         return false;
       } else {
@@ -257,7 +268,6 @@ function routeMessage(message) {
       }
     case COMPONENTS.OFFSCREEN:
       if (offscreenPort) {
-        console.log("Routing message to offscreen");
         offscreenPort.postMessage(message);
         return false;
       } else {
