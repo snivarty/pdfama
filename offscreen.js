@@ -1,31 +1,45 @@
-// Establish connection to background
-const port = chrome.runtime.connect({ name: 'offscreen' });
-
-const COMPONENTS = {
-  SIDEBAR: 'sidebar',
-  BACKGROUND: 'background',
-  OFFSCREEN: 'offscreen'
-};
+// offscreen.js
 
 import { VectorDB } from '/lib/vectoridb/index.js';
 import { pipeline, env } from '/lib/transformers/transformers.min.js';
-import { getSession, saveSession, VECTORS_STORE } from '/lib/sessiondb/index.js';
 
 // --- CONFIGURATION ---
 const CHUNK_SIZE = 1024;
 const CHUNK_OVERLAP = 100;
-const TOKEN_LIMIT = 32000;
+const TOKEN_LIMIT = 32000; // A conservative token limit for Gemini Nano
 const EMBEDDING_MODEL = 'Xenova/all-MiniLM-L6-v2';
-const VECTOR_PROPERTY_NAME = 'embedding';
+
+// VectorDB specific configuration
+const DB_PREFIX = 'pdfAMA_'; // Prefix for all PDF databases
+const OBJECT_STORE_NAME = 'pdfVectors';
+const VECTOR_PROPERTY_NAME = 'embedding'; // The property name within the stored object that holds the vector
 
 // --- STATE ---
+let chatSession;
+let directChatContext = null; // Stores PDF content for direct (non-RAG) chat sessions
 let abortController = null;
-let isSidebarActive = true; // Assume active initially
-let bufferedResponse = '';
-let bufferedUiState = '';
+let ragPipeline = null; // Will hold the RAG pipeline for large documents
 
 // --- ENVIRONMENT SETUP ---
+// Skip local model checks for a streamlined setup.
 env.allowLocalModels = false;
+
+// --- UTILITY FUNCTIONS ---
+/**
+ * Generates a simple, stable hash from a string.
+ * Used to create unique database names from PDF URLs.
+ * @param {string} str The input string (e.g., PDF URL).
+ * @returns {string} A hash string.
+ */
+function hashString(str) {
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) {
+        const char = str.charCodeAt(i);
+        hash = ((hash << 5) - hash) + char;
+        hash |= 0; // Convert to 32bit integer
+    }
+    return Math.abs(hash).toString(36); // Convert to base36 string
+}
 
 // --- CUSTOM TEXT SPLITTER ---
 class RecursiveCharacterTextSplitter {
@@ -117,72 +131,66 @@ class RecursiveCharacterTextSplitter {
     }
 }
 
-
-// --- HELPERS ---
-function getStoreName(url) {
-  // This will create a unique store name based on the URL.
-  // It will strip any special characters from the URL.
-  return `vdb_${url.replace(/[^a-zA-Z0-9]/g, "")}`;
-}
-
-// --- RAG PIPELINE ---
+// --- CLASSES ---
+/**
+ * Manages the entire RAG (Retrieval-Augmented Generation) pipeline.
+ */
 class RagPipeline {
-    constructor(url, text, vectorStore) {
-        this.url = url;
+    constructor(text, url, existingVectorStore = null) {
         this.text = text;
-        this.vectorStore = vectorStore;
+        this.url = url; // Store the URL
+        this.vectorStore = existingVectorStore; // Can be pre-initialized
         this.embedder = null;
     }
 
+    /**
+     * Initializes the pipeline by creating embeddings and the vector store.
+     */
     async init() {
+        chrome.runtime.sendMessage({ type: 'status-update', from: COMPONENTS.OFFSCREEN, to: COMPONENTS.SIDEBAR, url: this.url, message: 'Initializing AI model...' });
         this.embedder = await pipeline('feature-extraction', EMBEDDING_MODEL);
 
-
-        port.postMessage({
-          type: 'status-update',
-          from: COMPONENTS.OFFSCREEN,
-          to: COMPONENTS.SIDEBAR,
-          url: this.url,
-          data: { message: 'Chunking document...' }
-        });
-        const splitter = new RecursiveCharacterTextSplitter({
-            chunkSize: CHUNK_SIZE,
-            chunkOverlap: CHUNK_OVERLAP,
-        });
-        const chunks = await splitter.splitText(this.text);
-
-        port.postMessage({
-          type: 'status-update',
-          from: COMPONENTS.OFFSCREEN,
-          to: COMPONENTS.SIDEBAR,
-          url: this.url,
-          data: { message: 'Generating embeddings (this may take a while)...' }
-        });
-        console.log('Starting embedding of', chunks.length, 'chunks');
-        let processedChunks = 0;
-        for (const chunk of chunks) {
-            console.log('Embedding chunk', processedChunks + 1, 'of', chunks.length);
-            const embedding = await this.embedder(chunk, { pooling: 'mean', normalize: true });
-            await this.vectorStore.insert({
-                pdfUrl: this.url,
-                text: chunk,
-                [VECTOR_PROPERTY_NAME]: Array.from(embedding.data)
+        if (!this.vectorStore) { // Only create if not provided
+            chrome.runtime.sendMessage({ type: 'status-update', from: COMPONENTS.OFFSCREEN, to: COMPONENTS.SIDEBAR, url: this.url, message: 'Creating vector store...' });
+            this.vectorStore = new VectorDB({
+                dbName: DB_PREFIX + hashString(this.text), // Use a hash of the text for the DB name
+                objectStore: OBJECT_STORE_NAME,
+                vectorPath: VECTOR_PROPERTY_NAME,
+                vectorDimensions: 384 // Dimensions for all-MiniLM-L6-v2
             });
-            processedChunks++;
-            if (processedChunks % 10 === 0) {
-                port.postMessage({
-                  type: 'status-update',
-                  from: COMPONENTS.OFFSCREEN,
-                  to: COMPONENTS.SIDEBAR,
-                  url: this.url,
-                  data: { message: `Embedding... (${processedChunks}/${chunks.length})` }
+
+            chrome.runtime.sendMessage({ type: 'status-update', from: COMPONENTS.OFFSCREEN, to: COMPONENTS.SIDEBAR, url: this.url, message: 'Chunking document...' });
+            const splitter = new RecursiveCharacterTextSplitter({
+                chunkSize: CHUNK_SIZE,
+                chunkOverlap: CHUNK_OVERLAP,
+            });
+            const chunks = await splitter.splitText(this.text);
+
+            chrome.runtime.sendMessage({ type: 'status-update', from: COMPONENTS.OFFSCREEN, to: COMPONENTS.SIDEBAR, url: this.url, message: 'Generating embeddings (this may take a while)...' });
+            let processedChunks = 0;
+            for (const chunk of chunks) {
+                const embedding = await this.embedder(chunk, { pooling: 'mean', normalize: true });
+                await this.vectorStore.insert({
+                    text: chunk,
+                    [VECTOR_PROPERTY_NAME]: Array.from(embedding.data)
                 });
+                processedChunks++;
+                if (processedChunks % 10 === 0) {
+                     chrome.runtime.sendMessage({ type: 'status-update', from: COMPONENTS.OFFSCREEN, to: COMPONENTS.SIDEBAR, url: this.url, message: `Embedding... (${processedChunks}/${chunks.length})` });
+                }
             }
+        } else {
+            chrome.runtime.sendMessage({ type: 'status-update', from: COMPONENTS.OFFSCREEN, to: COMPONENTS.SIDEBAR, url: this.url, message: 'Re-using existing embeddings.' });
         }
     }
 
+    /**
+     * Retrieves relevant context from the vector store based on a query.
+     * @param {string} query - The user's question.
+     * @returns {Promise<string>} The retrieved context.
+     */
     async retrieve(query) {
-        if (!this.embedder) {
+        if (!this.embedder) { // Ensure embedder is initialized for retrieval
             this.embedder = await pipeline('feature-extraction', EMBEDDING_MODEL);
         }
         const queryEmbedding = await this.embedder(query, { pooling: 'mean', normalize: true });
@@ -191,322 +199,181 @@ class RagPipeline {
     }
 }
 
-// Need to track currentUrl in offscreen.js for tab activation/deactivation logic
-let currentUrl = null;
 
-// --- MESSAGE HANDLING ---
-port.onMessage.addListener(async (message) => {
-    // Only process messages addressed to offscreen
-    if (message.to !== COMPONENTS.OFFSCREEN) {
-      console.log("Offscreen ignoring message not addressed to it:", message);
-      return;
-    }
+const COMPONENTS = {
+  SIDEBAR: 'sidebar',
+  BACKGROUND: 'background',
+  OFFSCREEN: 'offscreen'
+};
 
-    console.log("Offscreen processing", message.type, "message");
-    switch (message.type) {
-        case 'start-processing':
-            await processPdfAndInitAi(message.data.url);
-            break;
-        case 'ask-question':
-            await handleAskQuestion(message.data.url, message.data.question);
-            break;
-        case 'terminate-chat':
-            console.log("Offscreen terminating chat");
-            if (abortController) {
-                abortController.abort();
-                abortController = null;
-            }
-            break;
-        case 'tab-activated':
-            console.log("Offscreen received tab-activated for url:", message.url);
-            // Initiate PDF processing and RAG pipeline for the activated tab
-            await processPdfAndInitAi(message.url);
-            // After processing, handle buffered responses if sidebar becomes active
-            if (message.url === currentUrl) {
-                isSidebarActive = true;
-                if (bufferedResponse) {
-                    port.postMessage({
-                        type: 'ama-chunk',
-                        from: COMPONENTS.OFFSCREEN,
-                        to: COMPONENTS.SIDEBAR,
-                        url: message.url,
-                        data: { chunk: bufferedResponse }
-                    });
-                    bufferedResponse = '';
-                }
-                if (bufferedUiState) {
-                    port.postMessage({
-                        type: 'status-update',
-                        from: COMPONENTS.OFFSCREEN,
-                        to: COMPONENTS.SIDEBAR,
-                        url: message.url,
-                        data: { message: bufferedUiState }
-                    });
-                    bufferedUiState = '';
-                }
-                port.postMessage({
-                    type: 'ama-complete-buffered', // Use a specific type for buffered completion
-                    from: COMPONENTS.OFFSCREEN,
-                    to: COMPONENTS.SIDEBAR,
-                    url: message.url
-                });
-            }
-            break;
-        case 'tab-deactivated':
-            console.log("Offscreen received tab-deactivated for url:", message.url);
-            if (message.url === currentUrl) {
-                isSidebarActive = false;
-            }
-            break;
-        case 'request-buffered-response':
-            console.log("Offscreen received request-buffered-response for url:", message.url);
-            if (message.url === currentUrl) {
-                if (bufferedResponse) {
-                    port.postMessage({
-                        type: 'ama-chunk',
-                        from: COMPONENTS.OFFSCREEN,
-                        to: COMPONENTS.SIDEBAR,
-                        url: message.url,
-                        data: { chunk: bufferedResponse }
-                    });
-                    bufferedResponse = '';
-                }
-                if (bufferedUiState) {
-                    port.postMessage({
-                        type: 'status-update',
-                        from: COMPONENTS.OFFSCREEN,
-                        to: COMPONENTS.SIDEBAR,
-                        url: message.url,
-                        data: { message: bufferedUiState }
-                    });
-                    bufferedUiState = '';
-                }
-                port.postMessage({
-                    type: 'ama-complete-buffered',
-                    from: COMPONENTS.OFFSCREEN,
-                    to: COMPONENTS.SIDEBAR,
-                    url: message.url
-                });
-            }
-            break;
+// Listen for commands from the Butler (background.js)
+chrome.runtime.onMessage.addListener(async (message) => {
+  console.log("[pdfAMA Engine Room]: Message received in offscreen.js listener:", message);
+  console.log("[pdfAMA Engine Room]: message.to:", message.to, "COMPONENTS.OFFSCREEN:", COMPONENTS.OFFSCREEN, "message.to === COMPONENTS.OFFSCREEN:", message.to === COMPONENTS.OFFSCREEN, "message.type:", message.type);
+
+  if (message.to !== COMPONENTS.OFFSCREEN) {
+    console.log("[pdfAMA Engine Room]: Message not addressed to offscreen, ignoring.");
+    return; // Ignore messages not addressed to this offscreen document
+  }
+
+  if (message.type === 'start-processing') {
+    console.log("[pdfAMA Engine Room]: Processing start-processing message.");
+    await processPdfAndInitAi(message.url);
+  } else if (message.type === 'ask-question') {
+    console.log("[pdfAMA Engine Room]: Processing ask-question message. Question:", message.question, "for url:", message.url);
+    await handleAskQuestion(message.question, message.url);
+  } else if (message.type === 'terminate-chat') {      // NEW
+    console.log("[pdfAMA Engine Room]: Processing terminate-chat message. Termination requested.");
+    if (abortController) {
+      abortController.abort();
+      abortController = null;
     }
+  } else if (message.type === 'tab-deactivated') {
+    // Handle tab deactivation if necessary, though offscreen.js doesn't directly manage active tabs
+    console.log("[pdfAMA Engine Room]: Received tab-deactivated for url:", message.url);
+  } else if (message.type === 'tab-activated') {
+    // Handle tab activation if necessary
+    console.log("[pdfAMA Engine Room]: Received tab-activated for url:", message.url);
+    await processPdfAndInitAi(message.url); // Re-process or ensure session is active
+  } else if (message.type === 'request-buffered-response') {
+    // Handle request for buffered response if necessary
+    console.log("[pdfAMA Engine Room]: Received request-buffered-response for url:", message.url);
+    // In this setup, offscreen.js doesn't buffer responses for sidebar directly.
+    // The sidebar should request the current state from background, which then gets it from offscreen.
+  }
 });
 
-
 async function processPdfAndInitAi(url) {
-    currentUrl = url; // Set currentUrl when processing starts
-    try {
-        // Always re-process the PDF and initialize RAG for new RAG-able docs.
-        // This ensures the pipeline runs even if a session with text exists,
-        // addressing the "stuck on initiating" issue.
-        let session = await getSession(url);
-        if (!session) {
-            session = { url, text: '', chatHistory: [], isRAG: false, uiState: 'Processing PDF...' };
-        } else {
-            // If a session exists, clear its text and RAG status to force re-processing
-            session.text = '';
-            session.isRAG = false;
-            session.uiState = 'Processing PDF...';
-        }
+  try {
+    chrome.runtime.sendMessage({ type: 'status-update', from: COMPONENTS.OFFSCREEN, to: COMPONENTS.SIDEBAR, url: url, message: 'Processing PDF...' });
+    
+    // Step 1: Fetch and Parse the PDF
+    const { getDocument, GlobalWorkerOptions } = await import(chrome.runtime.getURL('lib/pdfjs/build/pdf.mjs'));
+    
+    // Use a dedicated worker loader script to handle PDF.js worker imports
+    GlobalWorkerOptions.workerSrc = chrome.runtime.getURL('lib/pdfjs/build/pdfjs-worker-loader.js');
 
-        await saveSession(session);
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`Fetch failed: ${response.statusText}`);
+    const pdfData = await response.arrayBuffer();
+    if (pdfData.byteLength === 0) throw new Error("Fetched PDF is empty. Ensure 'Allow access to file URLs' is enabled for the extension.");
+    
+    const typedArray = new Uint8Array(pdfData);
+    const pdf = await getDocument({ data: typedArray }).promise;
+    let textContent = '';
+    for (let i = 1; i <= pdf.numPages; i++) {
+        textContent += (await (await pdf.getPage(i)).getTextContent()).items.map(item => item.str).join(' ');
+    }
 
-        port.postMessage({
-          type: 'status-update',
-          from: COMPONENTS.OFFSCREEN,
-          to: COMPONENTS.SIDEBAR,
-          url,
-          data: { message: session.uiState }
-        });
-        const { getDocument, GlobalWorkerOptions } = await import(chrome.runtime.getURL('lib/pdfjs/build/pdf.mjs'));
-        GlobalWorkerOptions.workerSrc = chrome.runtime.getURL('lib/pdfjs/build/pdfjs-worker-loader.js');
+    // Step 2: Initialize the AI based on document size
+    if (!self.LanguageModel) throw new Error("LanguageModel API not available.");
+    const availability = await self.LanguageModel.availability({expectedOutputs: [{ type: "text", languages: ["en"] }]});
+    if (availability !== 'available') throw new Error(`AI model not available: ${availability}`);
 
-        const response = await fetch(url);
-        if (!response.ok) throw new Error(`Fetch failed: ${response.statusText}`);
-        const pdfData = await response.arrayBuffer();
-        if (pdfData.byteLength === 0) throw new Error("Fetched PDF is empty.");
+    if (textContent.length > TOKEN_LIMIT) {
+        // --- RAG PATH for Large Documents ---
+        const dbName = DB_PREFIX + hashString(url); // Use URL hash for DB name
+        let existingVectorStore = null;
 
-        const typedArray = new Uint8Array(pdfData);
-        const pdf = await getDocument({ data: typedArray }).promise;
-        let textContent = '';
-        for (let i = 1; i <= pdf.numPages; i++) {
-            textContent += (await (await pdf.getPage(i)).getTextContent()).items.map(item => item.str).join(' ');
-        }
-
-        const isRAG = textContent.length > TOKEN_LIMIT;
-        session.text = textContent;
-        session.isRAG = isRAG;
-        session.uiState = 'Ready to chat.'; // Default after processing
-        await saveSession(session);
-
-        if (isRAG) {
-            console.log("Document exceeds token limit, initializing RAG pipeline.");
-            session.uiState = 'Initializing RAG pipeline...';
-            await saveSession(session);
-            console.log("Updating sidebar with RAG initialization status.");
-            port.postMessage({
-              type: 'status-update',
-              from: COMPONENTS.OFFSCREEN,
-              to: COMPONENTS.SIDEBAR,
-              url,
-              data: { message: session.uiState }
-            });
-            console.log("Initializing RAG pipeline for URL:", url);
-            const storeName = getStoreName(url);
-            const vectorStore = new VectorDB({
-                dbName: 'pdfAMA',
-                storeName,
+        try {
+            // Attempt to open existing DB
+            const tempStore = new VectorDB({
+                dbName: dbName,
+                objectStore: OBJECT_STORE_NAME,
                 vectorPath: VECTOR_PROPERTY_NAME,
-                vectorDimensions: 384
+                vectorDimensions: 384 // Must match the dimensions used during creation
             });
-            const rag = new RagPipeline(url, session.text, vectorStore);
-            console.log("Starting RAG init...");
-            await rag.init(); // Trigger chunking and embedding here
-            console.log("RAG init complete.");
-            session.uiState = 'Ready to chat.'; // After RAG init, it's ready
-            await saveSession(session);
+            // Check if the object store exists and has data
+            const db = await tempStore._db; // Access the internal promise for the DB
+            const transaction = db.transaction([OBJECT_STORE_NAME], "readonly");
+            const store = transaction.objectStore(OBJECT_STORE_NAME);
+            const count = await new Promise((resolve, reject) => {
+                const req = store.count();
+                req.onsuccess = () => resolve(req.result);
+                req.onerror = () => reject(req.error);
+            });
+
+            if (count > 0) {
+                existingVectorStore = tempStore;
+                console.log(`[pdfAMA Engine Room]: Re-using existing VectorDB for ${url}`);
+            } else {
+                console.log(`[pdfAMA Engine Room]: No existing embeddings found for ${url}. Creating new.`);
+            }
+        } catch (e) {
+            console.warn(`[pdfAMA Engine Room]: Could not open existing VectorDB for ${url}: ${e.message}. Creating new.`);
         }
 
-        port.postMessage({
-          type: 'status-update',
-          from: COMPONENTS.OFFSCREEN,
-          to: COMPONENTS.SIDEBAR,
-          url,
-          data: { message: 'Ready to chat.' }
-        });
-        port.postMessage({
-          type: 'init-chat',
-          from: COMPONENTS.OFFSCREEN,
-          to: COMPONENTS.SIDEBAR,
-          url,
-          data: { history: [] }
-        });
-
-    } catch (error) {
-        console.error('[pdfAMA Engine Room]: CRITICAL ERROR:', error);
-        port.postMessage({
-          type: 'error',
-          from: COMPONENTS.OFFSCREEN,
-          to: COMPONENTS.SIDEBAR,
-          url,
-          data: { message: error.message }
+        ragPipeline = new RagPipeline(textContent, url, existingVectorStore);
+        await ragPipeline.init();
+    } else {
+        // --- Direct Path for Small Documents ---
+        ragPipeline = null; // Ensure RAG is not used
+        directChatContext = textContent; // Store the PDF content for later use (for potential re-use or debugging)
+        chatSession = await self.LanguageModel.create({
+            initialPrompts: [
+                { role: 'system', content: 'You are a helpful assistant. Answer based *only* on the provided text.' },
+                { role: 'user', content: textContent } // Include PDF content as an initial user prompt
+            ],
+            expectedInputs: [{ type: "text", languages: ["en"] }],
+            expectedOutputs: [{ type: "text", languages: ["en"] }]
         });
     }
+    
+    chrome.runtime.sendMessage({ type: 'status-update', from: COMPONENTS.OFFSCREEN, to: COMPONENTS.SIDEBAR, url: url, message: 'Ready to chat.' });
+    chrome.runtime.sendMessage({ type: 'init-chat', from: COMPONENTS.OFFSCREEN, to: COMPONENTS.SIDEBAR, url: url, history: [] });
+
+  } catch (error) {
+    console.error('[pdfAMA Engine Room]: CRITICAL ERROR:', error);
+    chrome.runtime.sendMessage({ type: 'error', from: COMPONENTS.OFFSCREEN, to: COMPONENTS.SIDEBAR, url: url, message: error.message });
+  }
 }
 
-async function handleAskQuestion(url, question) {
+async function handleAskQuestion(question, url) { // Pass url to handleAskQuestion
+    console.log("[pdfAMA Engine Room]: Received question:", question);
     abortController = new AbortController();
     const { signal } = abortController;
 
     try {
-        const session = await getSession(url);
-        if (!session) throw new Error('Session not found.');
-
-        session.chatHistory.push({ role: 'user', content: question });
-
-        if (!self.LanguageModel) throw new Error("LanguageModel API not available.");
-        const availability = await self.LanguageModel.availability({expectedOutputs: [{ type: "text", languages: ["en"] }]});
-        if (availability !== 'available') throw new Error(`AI model not available: ${availability}`);
-
         let stream;
-        if (session.text.length > TOKEN_LIMIT) {
-            // --- RAG PATH ---
-            port.postMessage({
-              type: 'status-update',
-              from: COMPONENTS.OFFSCREEN,
-              to: COMPONENTS.SIDEBAR,
-              url,
-              data: { message: 'Thinking...' }
-            });
-            const storeName = getStoreName(url);
-            const vectorStore = new VectorDB({
-                dbName: 'pdfAMA',
-                storeName,
-                vectorPath: VECTOR_PROPERTY_NAME,
-                vectorDimensions: 384
-            });
-            const rag = new RagPipeline(url, session.text, vectorStore);
-            await rag.init();
-            const context = await rag.retrieve(question);
+        if (ragPipeline) {
+            // --- RAG Query ---
+            chrome.runtime.sendMessage({ type: 'status-update', from: COMPONENTS.OFFSCREEN, to: COMPONENTS.SIDEBAR, url: url, message: 'Searching document...' });
+            const context = await ragPipeline.retrieve(question);
             const augmentedPrompt = `Based on the following text, answer the question: "${question}"\n\n---\n\n${context}`;
-
+            
+            // For RAG, we create a new session for each query
             const ragSession = await self.LanguageModel.create({
-                 initialPrompts: [{ role: 'user', content: `You are a helpful assistant. Answer based *only* on the provided text. Here is the text: ${context}\n\nMy question is: ${question}` }],
+                 initialPrompts: [{ role: 'system', content: 'You are a helpful assistant. Answer based *only* on the provided text.' }],
                  expectedInputs: [{ type: "text", languages: ["en"] }],
                  expectedOutputs: [{ type: "text", languages: ["en"] }]
             });
             stream = await ragSession.promptStreaming(augmentedPrompt, { signal });
 
-        } else {
-            // --- DIRECT PATH ---
-            const initialUserPrompt = `You are a helpful assistant. Answer based *only* on the provided text. Here is the text: ${session.text}\n\nMy question is: ${question}`;
-            const prompts = [
-                { role: 'user', content: initialUserPrompt },
-                ...session.chatHistory.slice(0, -1).map(msg => ({
-                    ...msg,
-                    role: msg.role === 'model' ? 'assistant' : msg.role // Ensure all previous 'model' roles are 'assistant'
-                }))
-            ];
-            const chatSession = await self.LanguageModel.create({
-                initialPrompts: prompts,
-                expectedInputs: [{ type: "text", languages: ["en"] }],
-                expectedOutputs: [{ type: "text", languages: ["en"] }]
-            });
+        } else if (chatSession) { // Only proceed if chatSession is available
+            // --- Direct Query ---
+            // The chatSession already has the system prompt and PDF content from initialization.
+            // Just pass the user's question to continue the conversation.
             stream = await chatSession.promptStreaming(question, { signal });
-        }
-
-        let fullResponse = '';
-        for await (const chunk of stream) {
-            if (signal.aborted) return;
-            if (isSidebarActive) {
-                port.postMessage({
-                  type: 'ama-chunk',
-                  from: COMPONENTS.OFFSCREEN,
-                  to: COMPONENTS.SIDEBAR,
-                  url,
-                  data: { chunk }
-                });
-            } else {
-                bufferedResponse += chunk;
-            }
-            fullResponse += chunk;
-        }
-
-        session.chatHistory.push({ role: 'assistant', content: fullResponse });
-        await saveSession(session);
-
-        if (isSidebarActive) {
-            port.postMessage({
-              type: 'ama-complete',
-              from: COMPONENTS.OFFSCREEN,
-              to: COMPONENTS.SIDEBAR,
-              url
-            });
         } else {
-            // If sidebar is not active, send a special message to indicate completion
-            // and that the response is buffered.
-            bufferedUiState = 'Response ready (buffered).';
-            // No message sent here, it will be sent when tab is activated
+            throw new Error('AI session not ready.');
         }
 
+        for await (const chunk of stream) {
+            if (signal.aborted) {
+                console.log("[pdfAMA Engine Room]: Streaming aborted.");
+                return;
+            }
+            chrome.runtime.sendMessage({ type: 'ama-chunk', from: COMPONENTS.OFFSCREEN, to: COMPONENTS.SIDEBAR, url: url, chunk: chunk });
+        }
+        chrome.runtime.sendMessage({ type: 'ama-complete', from: COMPONENTS.OFFSCREEN, to: COMPONENTS.SIDEBAR, url: url });
 
     } catch (error) {
         if (error.name === 'AbortError' || (signal && signal.aborted)) {
-            port.postMessage({
-              type: 'ama-terminated',
-              from: COMPONENTS.OFFSCREEN,
-              to: COMPONENTS.SIDEBAR,
-              url
-            });
+            console.log("[pdfAMA Engine Room]: Chat was aborted by user.");
+            chrome.runtime.sendMessage({ type: 'ama-terminated', from: COMPONENTS.OFFSCREEN, to: COMPONENTS.SIDEBAR, url: url });
         } else {
             console.error('[pdfAMA Engine Room]: AI Query Error:', error);
-            port.postMessage({
-              type: 'error',
-              from: COMPONENTS.OFFSCREEN,
-              to: COMPONENTS.SIDEBAR,
-              url,
-              data: { message: `AI Error: ${error.message}` }
-            });
+            chrome.runtime.sendMessage({ type: 'error', from: COMPONENTS.OFFSCREEN, to: COMPONENTS.SIDEBAR, url: url, message: `AI Error: ${error.message}` });
         }
     } finally {
         abortController = null;

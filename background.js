@@ -9,7 +9,6 @@ const COMPONENTS = {
 
 // Maintain direct connections to components
 let sidebarPort = null;
-let offscreenPort = null;
 let activePdfTab = { tabId: null, url: null }; // Track the currently active PDF tab
 
 let sidebarReadyResolve = null;
@@ -45,46 +44,24 @@ chrome.runtime.onConnect.addListener((port) => {
             console.log("notifySidebarOfActiveTab called after sidebar-loaded.");
           }
         } else {
-          routeMessage(message);
+          // Messages not addressed to BACKGROUND are intended for other components (e.g., OFFSCREEN)
+          // Route these messages explicitly.
+          if (message.to === COMPONENTS.OFFSCREEN) {
+            console.log("[pdfAMA Background]: Routing message from sidebar to offscreen (via port.onMessage.addListener):", message);
+            chrome.runtime.sendMessage(message);
+          } else {
+            console.warn("[pdfAMA Background]: Unhandled message from sidebar:", message);
+          }
         }
-      });
-      break;
-    case COMPONENTS.OFFSCREEN:
-      offscreenPort = port;
-      console.log('Offscreen connection established');
-      if (offscreenReadyResolve) {
-        offscreenReadyResolve(); // Resolve the promise when offscreen connects
-        offscreenReadyResolve = null; // Clear the resolver
-      }
-      port.onDisconnect.addListener(() => {
-        console.log('Offscreen disconnected');
-        offscreenPort = null;
-        offscreenReadyPromise = null; // Reset promise on disconnect
-      });
-      port.onMessage.addListener((message) => {
-        routeMessage(message); // Offscreen messages are always routed to sidebar
       });
       break;
   }
 });
 
-let creating;
-let offscreenReadyPromise = null;
-let offscreenReadyResolve = null;
+// For offscreen.js, we will use chrome.runtime.sendMessage instead of MessagePorts.
+// So, no offscreenPort or related promises are needed here.
 
-// Ensure offscreenReadyPromise is always a valid promise that resolves when offscreenPort is available
-function ensureOffscreenReadyPromise() {
-  if (!offscreenReadyPromise) {
-    offscreenReadyPromise = new Promise(resolve => {
-      offscreenReadyResolve = resolve;
-      if (offscreenPort) { // If already connected, resolve immediately
-        offscreenReadyResolve();
-        offscreenReadyResolve = null; // Clear resolver after use
-      }
-    });
-  }
-  return offscreenReadyPromise;
-}
+let creating;
 
 function getComponentNameFromUrl(url) {
   if (url?.includes('sidebar.html')) return COMPONENTS.SIDEBAR;
@@ -102,12 +79,8 @@ async function setupOffscreenDocument(path) {
     await navigator.storage.persist();
   }
 
-  // Always ensure a promise exists
-  const currentOffscreenReadyPromise = ensureOffscreenReadyPromise();
-
   if (await hasOffscreenDocument()) {
-    // If offscreen document already exists, just wait for the port to be ready
-    return currentOffscreenReadyPromise;
+    return; // Offscreen document already exists
   }
 
   if (creating) {
@@ -124,7 +97,6 @@ async function setupOffscreenDocument(path) {
       creating = null;
     }
   }
-  return currentOffscreenReadyPromise;
 }
 
 async function notifySidebarOfActiveTab() {
@@ -135,14 +107,12 @@ async function notifySidebarOfActiveTab() {
             // If no active tab or URL, and there was a previous PDF tab, deactivate it
             if (activePdfTab.url) {
                 console.log(`No active tab or URL. Deactivating previous PDF tab: ${activePdfTab.url}`);
-                if (offscreenPort) {
-                    offscreenPort.postMessage({
-                        type: 'tab-deactivated',
-                        from: COMPONENTS.BACKGROUND,
-                        to: COMPONENTS.OFFSCREEN,
-                        url: activePdfTab.url
-                    });
-                }
+                chrome.runtime.sendMessage({
+                    type: 'tab-deactivated',
+                    from: COMPONENTS.BACKGROUND,
+                    to: COMPONENTS.OFFSCREEN,
+                    url: activePdfTab.url
+                });
                 activePdfTab = { tabId: null, url: null };
             }
             if (sidebarPort) sidebarPort.postMessage({
@@ -162,14 +132,12 @@ async function notifySidebarOfActiveTab() {
             // If there was a previous active PDF tab, send deactivate signal
             if (activePdfTab.url) {
                 console.log(`Tab changed. Deactivating previous PDF tab: ${activePdfTab.url}`);
-                if (offscreenPort) {
-                    offscreenPort.postMessage({
-                        type: 'tab-deactivated',
-                        from: COMPONENTS.BACKGROUND,
-                        to: COMPONENTS.OFFSCREEN,
-                        url: activePdfTab.url
-                    });
-                }
+                chrome.runtime.sendMessage({
+                    type: 'tab-deactivated',
+                    from: COMPONENTS.BACKGROUND,
+                    to: COMPONENTS.OFFSCREEN,
+                    url: activePdfTab.url
+                });
             }
 
             if (isCurrentTabPdf) {
@@ -177,25 +145,20 @@ async function notifySidebarOfActiveTab() {
                 console.log(`New active tab is PDF: ${currentActiveTab.url}. Activating.`);
                 await setupOffscreenDocument(OFFSCREEN_DOCUMENT_PATH); // Ensure offscreen document is ready
 
-                // Now, explicitly wait for both ports to be established if they aren't already
-                if (!offscreenPort) {
-                    console.log("Waiting for offscreenPort to connect...");
-                    await ensureOffscreenReadyPromise();
-                }
                 if (!sidebarPort) {
                     console.log("Waiting for sidebarPort to connect...");
                     await sidebarReadyPromise;
                 }
 
-                if (offscreenPort && sidebarPort) {
-                    console.log("Both offscreen and sidebar ports are connected. Sending pdf-activated and tab-activated messages.");
+                if (sidebarPort) {
+                    console.log("Sidebar port is connected. Sending pdf-activated and tab-activated messages.");
                     sidebarPort.postMessage({
                       type: 'pdf-activated',
                       from: COMPONENTS.BACKGROUND,
                       to: COMPONENTS.SIDEBAR,
-                      data: { url: currentActiveTab.url }
+                      url: currentActiveTab.url // Send url directly, not nested in data
                     });
-                    offscreenPort.postMessage({
+                    chrome.runtime.sendMessage({
                         type: 'tab-activated',
                         from: COMPONENTS.BACKGROUND,
                         to: COMPONENTS.OFFSCREEN,
@@ -203,7 +166,7 @@ async function notifySidebarOfActiveTab() {
                     });
                     activePdfTab = { tabId: currentActiveTab.id, url: currentActiveTab.url };
                 } else {
-                    console.warn("Failed to establish offscreen connection or sidebar port after setup, skipping PDF activation. OffscreenPort:", offscreenPort ? "connected" : "not connected", "SidebarPort:", sidebarPort ? "connected" : "not connected");
+                    console.warn("Failed to establish sidebar port after setup, skipping PDF activation. SidebarPort:", sidebarPort ? "connected" : "not connected");
                     activePdfTab = { tabId: null, url: null }; // Reset if activation fails
                 }
             } else {
@@ -221,24 +184,20 @@ async function notifySidebarOfActiveTab() {
             console.log(`Initial PDF tab activation: ${currentActiveTab.url}.`);
             await setupOffscreenDocument(OFFSCREEN_DOCUMENT_PATH);
 
-            if (!offscreenPort) {
-                console.log("Waiting for offscreenPort to connect during initial activation...");
-                await ensureOffscreenReadyPromise();
-            }
             if (!sidebarPort) {
                 console.log("Waiting for sidebarPort to connect during initial activation...");
                 await sidebarReadyPromise;
             }
 
-            if (offscreenPort && sidebarPort) {
-                console.log("Both offscreen and sidebar ports are connected during initial activation. Sending pdf-activated and tab-activated messages.");
+            if (sidebarPort) {
+                console.log("Sidebar port is connected during initial activation. Sending pdf-activated and tab-activated messages.");
                 sidebarPort.postMessage({
                   type: 'pdf-activated',
                   from: COMPONENTS.BACKGROUND,
                   to: COMPONENTS.SIDEBAR,
-                  data: { url: currentActiveTab.url }
+                  url: currentActiveTab.url // Send url directly, not nested in data
                 });
-                offscreenPort.postMessage({
+                chrome.runtime.sendMessage({
                     type: 'tab-activated',
                     from: COMPONENTS.BACKGROUND,
                     to: COMPONENTS.OFFSCREEN,
@@ -246,7 +205,7 @@ async function notifySidebarOfActiveTab() {
                 });
                 activePdfTab = { tabId: currentActiveTab.id, url: currentActiveTab.url };
             } else {
-                console.warn("Failed to establish offscreen connection or sidebar port during initial PDF activation. OffscreenPort:", offscreenPort ? "connected" : "not connected", "SidebarPort:", sidebarPort ? "connected" : "not connected");
+                console.warn("Failed to establish sidebar port during initial PDF activation. SidebarPort:", sidebarPort ? "connected" : "not connected");
                 activePdfTab = { tabId: null, url: null };
             }
         }
@@ -255,66 +214,29 @@ async function notifySidebarOfActiveTab() {
     }
 }
 
-function routeMessage(message) {
-  // Route based on 'to' field using direct ports
-  switch (message.to) {
-    case COMPONENTS.SIDEBAR:
-      if (sidebarPort) {
-        sidebarPort.postMessage(message);
-        return false;
-      } else {
-        console.warn("Sidebar port not connected");
-        return false;
-      }
-    case COMPONENTS.OFFSCREEN:
-      if (offscreenPort) {
-        offscreenPort.postMessage(message);
-        return false;
-      } else {
-        console.warn("Offscreen port not connected");
-        return false;
-      }
-    case COMPONENTS.BACKGROUND:
-      return true; // Process internally
-    default:
-      console.warn(`Unknown recipient: ${message.to}`);
-      return false;
-  }
-}
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    // Messages from offscreen to sidebar are routed here
+    if (message.from === COMPONENTS.OFFSCREEN && message.to === COMPONENTS.SIDEBAR) {
+        if (sidebarPort) {
+            sidebarPort.postMessage(message);
+            return false; // Message handled
+        } else {
+            console.warn("Sidebar port not connected, cannot route message from offscreen:", message);
+            return false;
+        }
+    }
+    // Messages from sidebar to offscreen are routed here (via background)
+    if (message.from === COMPONENTS.SIDEBAR && message.to === COMPONENTS.OFFSCREEN) {
+        console.log("[pdfAMA Background]: Routing message from sidebar to offscreen:", message);
+        chrome.runtime.sendMessage(message);
+        return false; // Message handled
+    }
+    // Other messages can be processed by the default routeMessage function if needed
+    // For now, we assume all offscreen -> sidebar and sidebar -> offscreen messages are handled above.
+    return false; // Default to not processing internally unless explicitly handled
+});
 
-// The chrome.runtime.onMessage listener is no longer needed as all communication is now port-based.
-// It is kept here for historical context during the refactoring process.
-// chrome.runtime.onMessage.addListener(async (message, sender) => {
-//   console.log("Background received legacy message:", message, "from", sender);
 
-//     // Check if this is the pdf-detected message from content script
-//     if (message.type === 'pdf-detected' && !message.to) {
-//       console.log("Background received pdf-detected from content script, but ignoring - PDF detection handled by tab queries");
-//       return;
-//     }
-
-//     // All other messages must be structured now - reject legacy format
-//     if (!message.to) {
-//       console.error("Rejected legacy message without 'to' field:", message, "from:", sender.url);
-//       return;
-//     }
-
-//     // Handle internal messages first
-//     if (message.type === 'sidebar-loaded' && message.from === COMPONENTS.SIDEBAR && message.to === COMPONENTS.BACKGROUND) {
-//         console.log("Background processing sidebar-loaded");
-//         notifySidebarOfActiveTab();
-//         return;
-//     }
-
-//     // Route all other messages
-//     console.log("Background routing message:", message);
-//     const shouldProcessInternally = routeMessage(message);
-//     if (!shouldProcessInternally) {
-//       console.log("Background routed message successfully");
-//     } else {
-//       console.log("Background processed message internally");
-//     }
-// });
 
 chrome.tabs.onActivated.addListener(notifySidebarOfActiveTab);
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
@@ -326,14 +248,12 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 chrome.tabs.onRemoved.addListener((tabId) => {
     if (activePdfTab.tabId === tabId) {
         console.log(`PDF tab ${tabId} removed. Deactivating.`);
-        if (offscreenPort) {
-            offscreenPort.postMessage({
-                type: 'tab-deactivated',
-                from: COMPONENTS.BACKGROUND,
-                to: COMPONENTS.OFFSCREEN,
-                url: activePdfTab.url
-            });
-        }
+        chrome.runtime.sendMessage({
+            type: 'tab-deactivated',
+            from: COMPONENTS.BACKGROUND,
+            to: COMPONENTS.OFFSCREEN,
+            url: activePdfTab.url
+        });
         activePdfTab = { tabId: null, url: null };
     }
 });

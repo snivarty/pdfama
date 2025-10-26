@@ -1,7 +1,6 @@
 // sidebar.js
 
 let port;
-let messageHandler;
 
 function connect() {
     port = chrome.runtime.connect({ name: 'sidebar' });
@@ -11,9 +10,7 @@ function connect() {
         port = null; // Set port to null on disconnection
     });
 
-    if (messageHandler) {
-        port.onMessage.addListener(messageHandler);
-    }
+    // The message listener will be set up in DOMContentLoaded
 }
 
 function safePostMessage(message) {
@@ -91,23 +88,29 @@ document.addEventListener('DOMContentLoaded', () => {
       addMessage(question, 'user');
       setUIState('thinking', 'Thinking...');
       isThinking = true;
-      safePostMessage({
-        type: 'ask-question',
-        from: COMPONENTS.SIDEBAR,
-        to: COMPONENTS.OFFSCREEN,
-        url: currentUrl,
-        data: { question: question, url: currentUrl }
-      });
+            safePostMessage({
+              type: 'ask-question',
+              from: COMPONENTS.SIDEBAR,
+              to: COMPONENTS.OFFSCREEN,
+              url: currentUrl,
+              question: question // Send question directly, not nested in data
+            });
       chatInput.value = '';
       chatSend.disabled = true;
     }
   };
 
   // --- Message Listener ---
-  messageHandler = (message) => {
+  port.onMessage.addListener((message) => {
+    // Only process messages addressed to sidebar
+    if (message.to !== COMPONENTS.SIDEBAR) {
+      console.log("Sidebar ignoring message not addressed to it:", message);
+      return;
+    }
+
     // Initial activation messages from background script
     if (message.type === 'pdf-activated') {
-        const url = message.data.url;
+        const url = message.url; // Corrected: read url directly from message
         console.log("Sidebar processing pdf-activated for url:", url, "currentUrl:", currentUrl);
         if (currentUrl !== url) {
             currentUrl = url;
@@ -117,9 +120,8 @@ document.addEventListener('DOMContentLoaded', () => {
             safePostMessage({
               type: 'start-processing',
               from: COMPONENTS.SIDEBAR,
-              to: COMPONENTS.OFFSCREEN,
-              url: currentUrl,
-              data: { url: currentUrl }
+              to: COMPONENTS.BACKGROUND, // Send to background, which will route to offscreen
+              url: currentUrl // Send url directly, not nested in data
             });
         }
         return;
@@ -149,17 +151,12 @@ document.addEventListener('DOMContentLoaded', () => {
             safePostMessage({
                 type: 'request-buffered-response', // New message type for offscreen
                 from: COMPONENTS.SIDEBAR,
-                to: COMPONENTS.OFFSCREEN,
+                to: COMPONENTS.BACKGROUND, // Send to background, which will route to offscreen
                 url: currentUrl
             });
             // Re-evaluate UI state based on current session (which offscreen will send via init-chat or status-update)
-            safePostMessage({
-              type: 'start-processing', // Re-trigger processing to get latest state
-              from: COMPONENTS.SIDEBAR,
-              to: COMPONENTS.OFFSCREEN,
-              url: currentUrl,
-              data: { url: currentUrl }
-            });
+            // The offscreen document should send an init-chat or status-update message upon receiving 'tab-activated'
+            // if it needs to update the sidebar's state. No need to re-trigger start-processing from here.
         }
         return;
     }
@@ -174,18 +171,18 @@ document.addEventListener('DOMContentLoaded', () => {
     let lastMessageElement;
     switch (message.type) {
       case 'status-update':
-        if (message.data.message === 'Thinking...') {
-          setUIState('thinking', message.data.message);
+        if (message.message === 'Thinking...') { // Corrected: read message directly
+          setUIState('thinking', message.message);
         } else {
-          setUIState('loading', message.data.message);
+          setUIState('loading', message.message); // Corrected: read message directly
         }
         break;
 
       case 'init-chat':
         chatMessages.innerHTML = '';
-        message.data.history.forEach(msg => addMessage(marked.parse(msg.content), msg.role));
+        message.history.forEach(msg => addMessage(marked.parse(msg.content), msg.role)); // Corrected: read history directly
         // Restore UI state from session, or default to 'ready' if not present
-        setUIState('ready', message.data.uiState || 'Ready to chat.');
+        setUIState('ready', message.uiState || 'Ready to chat.'); // Corrected: read uiState directly
         break;
 
       case 'ama-chunk':
@@ -195,7 +192,7 @@ document.addEventListener('DOMContentLoaded', () => {
           lastMessageElement.querySelector('.bubble')._markdownContent = '';
         }
         const bubble = lastMessageElement.querySelector('.bubble');
-        bubble._markdownContent += message.data.chunk;
+        bubble._markdownContent += message.chunk; // Corrected: read chunk directly
         bubble.innerHTML = marked.parse(bubble._markdownContent); // Parse and render accumulated content
         chatMessages.scrollTop = chatMessages.scrollHeight;
         break;
@@ -221,16 +218,12 @@ document.addEventListener('DOMContentLoaded', () => {
         break;
 
       case 'error':
-        addMessage(`Error: ${message.data.message}`, 'assistant');
+        addMessage(`Error: ${message.message}`, 'assistant'); // Corrected: read message directly
         setUIState('ready', 'You can try asking another question.');
         isThinking = false;
         break;
     }
-  };
-
-  if (port) {
-    port.onMessage.addListener(messageHandler);
-  }
+  });
 
   // --- Input & Button Events ---
   chatSend.addEventListener('click', handleUserMessage);
@@ -251,9 +244,8 @@ document.addEventListener('DOMContentLoaded', () => {
       safePostMessage({
         type: 'terminate-chat',
         from: COMPONENTS.SIDEBAR,
-        to: COMPONENTS.OFFSCREEN,
-        url: currentUrl,
-        data: { url: currentUrl }
+        to: COMPONENTS.BACKGROUND, // Send to background, which will route to offscreen
+        url: currentUrl // Send url directly, not nested in data
       });
     }
   });
