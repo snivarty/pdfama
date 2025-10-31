@@ -20,14 +20,14 @@ Key features include:
 
 ## How we built it
 
-`pdfAMA` is a Chrome extension engineered for privacy and performance, operating entirely client-side. Our architecture combines robust components and smart communication to deliver on-device AI.
+`pdfAMA` is engineered for privacy and performance, operating entirely client-side. Our architecture combines robust components and smart communication to deliver on-device AI.
 
 #### Key Architectural Elements:
 
-*   **PDF Content Extraction:** We use a browser-native PDF parsing library, isolating heavy text extraction from the main browser thread, keeping your experience smooth and secure.
-*   **Local Vector Database (RAG Foundation):** For larger documents, extracted text is chunked and converted into embeddings by an in-browser AI model. These embeddings are stored as a local vector database in the browsers's IndexedDB, forming the core of our Retrieval Augmented Generation (RAG) system.
+*   **PDF Content Extraction:** We use a browser-native PDF parsing library (pdf.js), isolating heavy text extraction from the main browser thread, keeping your experience smooth and secure.
+*   **Local Vector Database (RAG Foundation):** For larger documents, extracted text is chunked and converted into embeddings by an in-browser AI model, using transformers.js. These embeddings are stored as a local vector database in the browsers's IndexedDB, forming the core of our Retrieval Augmented Generation (RAG) system.
 *   **Inter-component Messaging:** The **sidebar UI** communicates with a **background script**, which orchestrates tasks. Intensive operations like embedding generation are delegated to the **offscreen** document via message passing, ensuring a fluid user experience without blocking the UI.
-*   **AI-Powered Q&A (RAG in Action):** User queries are embedded, and a rapid similarity search retrieves relevant text chunks from the local vector database. These chunks, along with the query, are fed to Gemini Nano via Chrome's **Prompt API** to synthesize precise, contextual answers. This RAG approach ensures answers are grounded in your document, enhancing trustworthiness.
+*   **AI-Powered Q&A (RAG in Action):** User queries are embedded, and a similarity search retrieves relevant text chunks from the local vector database. These chunks, along with the query, are fed to Gemini Nano via Chrome's **Prompt API** to synthesize precise, contextual answers. This RAG approach ensures answers are grounded in your document, enhancing trustworthiness.
 
 ## Challenges we ran into
 
@@ -41,8 +41,8 @@ Developing a fully local, AI-powered PDF query tool presented several interestin
 
 We are proud of `pdfAMA`'s ability to deliver a truly private and powerful AI experience directly in the browser, with response times and quality comparable to commercial cloud solutions. Our key accomplishments include:
 
-*   **Achieving 100% On-Device AI Processing:** Successfully implementing a complete AI pipeline—from PDF parsing to question answering—that operates entirely within the user's browser, setting a new standard for data privacy in AI tools.
-*   **Near-Instantaneous Response Times:** By eliminating network latency, `pdfAMA` provides answers almost instantly, significantly enhancing the user experience.
+*   **Achieving 100% On-Device AI Processing:** Successfully implementing a complete AI pipeline—from PDF parsing to question answering—that operates entirely within the user's browser that works for large and complex documents.
+*   **Fast Response Times:** By eliminating network latency, `pdfAMA` provides answers almost instantly, significantly enhancing the user experience.
 *   **Robust Local Storage:** Developing an efficient, in-browser vector database capable of handling complex document embeddings and rapid similarity searches.
 *   **Seamless Integration with Chrome's Built-in AI:** Effectively leveraging the Prompt API to power intelligent document interactions without compromising performance or privacy.
 
@@ -50,8 +50,8 @@ We are proud of `pdfAMA`'s ability to deliver a truly private and powerful AI ex
 
 Building `pdfAMA` was an interesting exercise to explore the potential of Chrome Built-in AI and related technologies:
 
-*   **Chrome extensions:** how extensions can function in this context, specifically as a sidePanel that is always accessible.
-*   **Client-Side PDF Text Extraction:** utilizing the power of existing pdf parsing libraries to extract data from PDF documents.
+*   **Chrome extensions:** How extensions can function in this context, specifically as a sidepanel that is always accessible.
+*   **Client-Side PDF Text Extraction:** Utilizing the power of existing pdf parsing libraries to extract data from PDF documents.
 *   **On-Device AI:** We gained insights into integrating with the Gemini model as well as transformers to run efficiently within the browser environment, balancing performance with minimal resource consumption, e.g., with our RAG-based approach to work on large documents.
 *   **Optimizing Local Vector Search:** Developing and fine-tuning an efficient vector database and search mechanism that delivers results quickly in the browser.
 *   **Designing for Privacy:** Understanding and implementing best practices for data security and user privacy within the strict confines of a browser extension.
@@ -60,7 +60,7 @@ Building `pdfAMA` was an interesting exercise to explore the potential of Chrome
 
 Our feature list includes:
 
-*   **Enhanced Multimodal Capabilities:** Exploring the integration of image and table understanding within PDFs using advanced on-device AI models.
+*   **Multimodal Capabilities:** Exploring the integration of image and table understanding within PDFs using advanced on-device AI models.
 *   **Advanced Summarization and Content Generation:** Leveraging Chrome's other Built-in AI APIs - Summarization, etc. - to offer more sophisticated document analysis and content creation features.
 *   **Collaborative Features (Privacy-Preserving):** Investigating secure, local-first methods for users to share insights or annotated PDFs without compromising privacy.
-*   **Broader Accessibility:** Expanding language support and accessibility features, in addition expanding usage beyond PDFs.
+*   **Broader Accessibility:** Expanding language support and accessibility features, in addition to expanding usage beyond PDFs.
